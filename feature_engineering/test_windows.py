@@ -66,20 +66,25 @@ def test_windows():
     assert w4_true['timestamp'].min() >= pd.Timestamp("2023-10-28 13:00:00", tz="UTC")
     
     # Case 4: Window 3 Cutoff Check (Event at 17:00 ET -> 21:00 UTC)
-    # Window 3 starts 17:30 ET. Nominal end 21:30 ET.
-    # Hard cutoff is 20:00 ET (00:00 UTC next day).
-    event_utc = "2023-10-27 21:00:00"
+    # Window 3 starts 17:30 ET. Nominal end 19:30 ET (120 mins).
+    # Hard cutoff is 20:00 ET. In this case, 19:30 is before 20:00, so no cutoff needed?
+    # Wait, if event is 21:00 UTC (17:00 ET). +30m = 17:30 ET. +120m = 19:30 ET.
+    # 19:30 ET < 20:00 ET. So it fits.
+    # To test cutoff, we need event closer to 20:00.
+    # Say Event at 18:30 ET (22:30 UTC). +30m = 19:00 ET. +120m = 21:00 ET.
+    # Cutoff at 20:00 ET.
+    event_utc = "2023-10-27 22:30:00"
     print(f"Case 4: Event at {event_utc} (Post-market, Window 3 Cutoff)")
     masks = get_window_masks(df, event_utc)
     
-    w3_true = df[masks['event_plus_30_to_240m']]
+    w3_true = df[masks['event_plus_30_to_120m']]
     if not w3_true.empty:
         max_ts = w3_true['timestamp'].max()
-        cutoff_ts = pd.Timestamp("2023-10-28 00:00:00", tz="UTC")
+        cutoff_ts = pd.Timestamp("2023-10-28 00:00:00", tz="UTC") # 20:00 ET
         print(f"  Window 3 max: {max_ts} (Cutoff: {cutoff_ts})")
         assert max_ts <= cutoff_ts
     else:
-        print("  Window 3 is empty (Correct, as start 17:30 ET is close to cutoff)")
+        print("  Window 3 is empty (Correct, as start 19:00 ET is close to cutoff)")
 
     # Case 5: N-Days Logic
     print("Case 5: N-Days Logic")
@@ -96,8 +101,13 @@ def test_windows():
     mask_before = get_n_days_before_mask(df, event_utc, n_days=1)
     true_before = df[mask_before]
     expected_end = pd.Timestamp("2023-10-27 20:00:00", tz="UTC") # Today 16:00 ET -> 20:00 UTC
-    print(f"  Post-market Before-Window End: {true_before['timestamp'].max()} (Expected: {expected_end})")
-    assert true_before['timestamp'].max() <= expected_end
+    print(f"  Post-market Before-Window End: {true_before['timestamp'].max()} (Expected < {expected_end})")
+    assert true_before['timestamp'].max() < expected_end
+    
+    # Verify exclusion of exact boundary
+    # 16:00 ET (20:00 UTC) should NOT be in the mask
+    boundary_ts = pd.Timestamp("2023-10-27 20:00:00", tz="UTC")
+    assert not mask_before[df['timestamp'] == boundary_ts].any(), "Boundary 16:00 ET should be excluded"
 
     print("Windows Test Passed!\n")
 

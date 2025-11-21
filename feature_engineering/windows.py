@@ -53,16 +53,16 @@ def get_window_masks(df, event_time_utc):
     w2_end = event_ts + pd.Timedelta(minutes=30)
     masks['event_plus_minus_30m'] = (ts_utc >= w2_start) & (ts_utc <= w2_end)
     
-    # --- Window 3: Event + 30 to + 240 mins ---
+    # --- Window 3: Event + 30 to + 120 mins ---
     w3_start = event_ts + pd.Timedelta(minutes=30)
-    w3_end_nominal = event_ts + pd.Timedelta(minutes=240)
+    w3_end_nominal = event_ts + pd.Timedelta(minutes=120)
     
     current_day_end = pd.Timestamp(event_et.date()).tz_localize('US/Eastern') + pd.Timedelta(hours=20)
     w3_cutoff = current_day_end.tz_convert('UTC')
     
     w3_end = min(w3_end_nominal, w3_cutoff)
     
-    masks['event_plus_30_to_240m'] = (ts_utc > w3_start) & (ts_utc <= w3_end)
+    masks['event_plus_30_to_120m'] = (ts_utc > w3_start) & (ts_utc <= w3_end)
     
     # --- Window 4: Next Open +/- 30 mins ---
     next_open_et = get_next_open(event_et)
@@ -94,7 +94,7 @@ def get_n_days_before_mask(df, event_time_utc, n_days=5):
     w1_end_utc = w1_end_et.tz_convert('UTC')
     w1_start_utc = w1_end_utc - pd.Timedelta(days=n_days)
     
-    return (ts_utc >= w1_start_utc) & (ts_utc <= w1_end_utc)
+    return (ts_utc >= w1_start_utc) & (ts_utc < w1_end_utc)
 
 def get_n_days_after_mask(df, event_time_utc, n_days=5):
     """Generates mask for N trading days after event."""
@@ -117,3 +117,26 @@ def get_n_days_after_mask(df, event_time_utc, n_days=5):
     w5_end_utc = w5_start_utc + pd.Timedelta(days=n_days)
     
     return (ts_utc >= w5_start_utc) & (ts_utc <= w5_end_utc)
+
+def get_time_window_mask(df, start_time, duration_seconds):
+    """
+    Generates boolean mask for rows within a time window.
+    
+    Args:
+        df (pd.DataFrame): DataFrame with 'timestamp' column.
+        start_time (str or pd.Timestamp): Start time in UTC.
+        duration_seconds (int): Duration in seconds.
+        
+    Returns:
+        pd.Series: Boolean mask for rows in [start_time, start_time + duration].
+    """
+    # Ensure DF timestamps are datetime UTC
+    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        ts_utc = pd.to_datetime(df['timestamp'], utc=True)
+    else:
+        ts_utc = df['timestamp'].dt.tz_convert('UTC') if df['timestamp'].dt.tz is not None else df['timestamp'].dt.tz_localize('UTC')
+
+    start_ts = pd.to_datetime(start_time, utc=True)
+    end_ts = start_ts + pd.Timedelta(seconds=duration_seconds)
+    
+    return (ts_utc >= start_ts) & (ts_utc <= end_ts)
