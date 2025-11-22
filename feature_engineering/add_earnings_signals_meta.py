@@ -66,7 +66,10 @@ def add_earnings_signals(input_file, output_file, pre_labeled=True):
         'event_price',
         'impulse_high', 'impulse_low',
         'first_5m_high', 'first_5m_low', 'peak_1m_vol_5m',
-        'vwap_uptime'
+        'vwap_uptime',
+        # Normalized features
+        'or_width_pct', 'cvd_pct_volume', 'vwap_distance_pct',
+        'first_5m_range_pct', 'impulse_range_pct'
     ]
     
     for col in event_cols:
@@ -127,6 +130,41 @@ def add_earnings_signals(input_file, output_file, pre_labeled=True):
                 above_vwap = event_slice['close'] > vwap_series
                 uptime = above_vwap.mean()
                 df.loc[event_mask, 'vwap_uptime'] = uptime
+            
+            # --- NORMALIZED FEATURES ---
+            
+            # 1. Opening Range Width (% of event price)
+            if or_high is not None and or_low is not None and event_price > 0:
+                or_width_pct = (or_high - or_low) / event_price
+                df.loc[event_mask, 'or_width_pct'] = or_width_pct
+            
+            # 2. CVD as % of cumulative volume
+            if not cvd_series.isna().all():
+                # Calculate cumulative volume for entire slice
+                cum_vol = event_slice['vol'].cumsum()
+                
+                # CVD normalized by cumulative volume (align by index)
+                cvd_pct = cvd_series.values / np.where(cum_vol.values > 0, cum_vol.values, 1)
+                df.loc[event_mask, 'cvd_pct_volume'] = cvd_pct
+            
+            # 3. VWAP Distance from Event Price (%)
+            if not vwap_series.isna().all() and event_price > 0:
+                vwap_distance_pct = (vwap_series - event_price) / event_price
+                df.loc[event_mask, 'vwap_distance_pct'] = vwap_distance_pct
+            
+            # 4. First 5m Range (% of event price)
+            first_5m_high = df.loc[event_mask, 'first_5m_high'].iloc[0]
+            first_5m_low = df.loc[event_mask, 'first_5m_low'].iloc[0]
+            if pd.notna(first_5m_high) and pd.notna(first_5m_low) and event_price > 0:
+                first_5m_range_pct = (first_5m_high - first_5m_low) / event_price
+                df.loc[event_mask, 'first_5m_range_pct'] = first_5m_range_pct
+            
+            # 5. Impulse Bar Range (% of event price)
+            impulse_high = df.loc[event_mask, 'impulse_high'].iloc[0]
+            impulse_low = df.loc[event_mask, 'impulse_low'].iloc[0]
+            if pd.notna(impulse_high) and pd.notna(impulse_low) and event_price > 0:
+                impulse_range_pct = (impulse_high - impulse_low) / event_price
+                df.loc[event_mask, 'impulse_range_pct'] = impulse_range_pct
 
     # --- Targets ---
     print("Calculating targets...")
