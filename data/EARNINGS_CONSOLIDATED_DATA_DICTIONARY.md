@@ -1,6 +1,8 @@
 # Earnings Consolidated Final Dataset - Data Dictionary
 
-**File**: `earnings_consolidated_final.csv`  
+**Dataset Name**: Earnings Consolidated Final  
+**Filename**: `earnings_consolidated_final.csv`  
+**Full Path**: `/Volumes/Extreme SSD/trading_data/stock/data/processed/earnings_consolidated_final.csv`  
 **Created**: 2025-11-22  
 **Size**: 671.9 MB  
 **Format**: CSV (UTF-8)
