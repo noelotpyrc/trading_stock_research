@@ -12,6 +12,7 @@ Features:
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from pathlib import Path
 
 # Paths
@@ -258,7 +259,327 @@ def create_candlestick_chart(df, bucket_col, event_datetime):
     return fig
 
 
+def create_combined_round_lot_flow_chart(df, event_datetime):
+    """
+    Create combined chart showing both round lot CVD metrics.
+    
+    Args:
+        df: DataFrame with second bar data
+        event_datetime: Earnings event datetime
+        
+    Returns:
+        Plotly figure with dual y-axes
+    """
+    # Identify round lots
+    df = df.copy()
+    df['is_round_lot'] = (
+        (df['num'] == 1) & 
+        (df['vol'].isin([100, 200, 300, 400, 500]))
+    )
+    
+    # Filter to round lots only
+    round_lots = df[df['is_round_lot']].copy()
+    
+    if len(round_lots) == 0:
+        # Return empty chart
+        fig = go.Figure()
+        fig.update_layout(title="Round Lot Flow (No Data)")
+        return fig
+    
+    # Sort by timestamp
+    round_lots = round_lots.sort_values('timestamp').reset_index(drop=True)
+    
+    # Calculate previous price for tick rule
+    round_lots['prev_close'] = round_lots['close'].shift(1)
+    
+    # Calculate signed volume (for CVD 1)
+    round_lots['signed_volume'] = np.where(
+        round_lots['vw'] > round_lots['prev_close'], 
+        round_lots['vol'],
+        np.where(
+            round_lots['vw'] < round_lots['prev_close'],
+            -round_lots['vol'],
+            0
+        )
+    )
+    
+    # Calculate percentage price impact (for CVD 2)
+    round_lots['price_impact_pct'] = np.where(
+        round_lots['prev_close'] > 0,
+        ((round_lots['vw'] - round_lots['prev_close']) / round_lots['prev_close']) * 100,
+        0
+    )
+    round_lots['weighted_impact'] = round_lots['price_impact_pct'] * round_lots['vol']
+    
+    # Filter to data after earnings event
+    round_lots = round_lots[round_lots['timestamp'] >= event_datetime].copy()
+    
+    # Calculate cumulative sums
+    round_lots['cvd'] = round_lots['signed_volume'].cumsum()
+    round_lots['impact_cvd'] = round_lots['weighted_impact'].cumsum()
+    
+    # Create string timestamp
+    round_lots['timestamp_str'] = round_lots['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Add sign-based CVD (left y-axis)
+    fig.add_trace(
+        go.Scatter(
+            x=round_lots['timestamp_str'],
+            y=round_lots['cvd'],
+            mode='lines',
+            name='Sign-Based CVD',
+            line=dict(color='purple', width=2),
+            hovertemplate='Time: %{x}<br>CVD: %{y:,.0f} shares<extra></extra>'
+        ),
+        secondary_y=False
+    )
+    
+    # Add price-impact CVD (right y-axis)
+    fig.add_trace(
+        go.Scatter(
+            x=round_lots['timestamp_str'],
+            y=round_lots['impact_cvd'],
+            mode='lines',
+            name='Impact-Weighted CVD',
+            line=dict(color='darkgreen', width=2, dash='dot'),
+            hovertemplate='Time: %{x}<br>Impact CVD: %{y:,.2f}<extra></extra>'
+        ),
+        secondary_y=True
+    )
+    
+    # Add zero lines
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3, secondary_y=False)
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3, secondary_y=True)
+    
+    # Update layout
+    fig.update_xaxes(
+        title_text="Time (UTC)",
+        type="date"
+    )
+    
+    fig.update_yaxes(
+        title_text="Sign-Based CVD (shares)",
+        secondary_y=False,
+        title_font=dict(color='purple')
+    )
+    
+    fig.update_yaxes(
+        title_text="Impact-Weighted CVD (% × shares)",
+        secondary_y=True,
+        title_font=dict(color='darkgreen')
+    )
+    
+    fig.update_layout(
+        title="Round Lot Flow - Combined CVD Metrics",
+        height=400,
+        template="plotly_white",
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    return fig
+
+
+def create_second_bar_analysis_chart(df, event_datetime):
+    """
+    Create combined chart with candlestick + round lot overlay (top) and 
+    round lot flow metrics (bottom) sharing the same x-axis for synchronized zooming.
+    
+    Args:
+        df: DataFrame with second bar data
+        event_datetime: Earnings event datetime
+        
+    Returns:
+        Plotly figure with subplots
+    """
+    # Filter to data after earnings event
+    df = df[df['timestamp'] >= event_datetime].copy()
+    
+    if len(df) == 0:
+        fig = go.Figure()
+        fig.update_layout(title="Second Bar Analysis (No Data After Earnings)")
+        return fig
+    
+    # Identify round lots
+    df['is_round_lot'] = (
+        (df['num'] == 1) & 
+        (df['vol'].isin([100, 200, 300, 400, 500]))
+    )
+    
+    # Create string timestamp
+    df['timestamp_str'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Prepare round lot data
+    round_lots = df[df['is_round_lot']].copy()
+    
+    if len(round_lots) > 0:
+        # Sort and calculate metrics
+        round_lots = round_lots.sort_values('timestamp').reset_index(drop=True)
+        round_lots['prev_close'] = round_lots['close'].shift(1)
+        
+        # Sign-based CVD
+        round_lots['signed_volume'] = np.where(
+            round_lots['vw'] > round_lots['prev_close'], 
+            round_lots['vol'],
+            np.where(
+                round_lots['vw'] < round_lots['prev_close'],
+                -round_lots['vol'],
+                0
+            )
+        )
+        round_lots['cvd'] = round_lots['signed_volume'].cumsum()
+        
+        # Price-impact CVD
+        round_lots['price_impact_pct'] = np.where(
+            round_lots['prev_close'] > 0,
+            ((round_lots['vw'] - round_lots['prev_close']) / round_lots['prev_close']) * 100,
+            0
+        )
+        round_lots['weighted_impact'] = round_lots['price_impact_pct'] * round_lots['vol']
+        round_lots['impact_cvd'] = round_lots['weighted_impact'].cumsum()
+        
+        round_lots['timestamp_str'] = round_lots['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Create subplots: row 1 = candlestick, row 2 = flow metrics
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.6, 0.4],
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        specs=[
+            [{"secondary_y": False}],
+            [{"secondary_y": True}]
+        ],
+        subplot_titles=("Price Action with Round Lots", "Round Lot Flow Metrics")
+    )
+    
+    # ===== ROW 1: Candlestick with Round Lot Overlay =====
+    fig.add_trace(
+        go.Candlestick(
+            x=df['timestamp_str'],
+            open=df['open'],
+            high=df['high'],
+            low=df['low'],
+            close=df['close'],
+            name='Price',
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+    
+    # Round lot overlay
+    if len(round_lots) > 0:
+        lot_sizes = {100: 4, 200: 6, 300: 8, 400: 10, 500: 12}
+        
+        for vol_size in [100, 200, 300, 400, 500]:
+            subset = round_lots[round_lots['vol'] == vol_size]
+            if len(subset) > 0:
+                fig.add_trace(
+                    go.Scatter(
+                        x=subset['timestamp_str'],
+                        y=subset['vw'],
+                        mode='markers',
+                        marker=dict(
+                            size=lot_sizes.get(vol_size, 4), 
+                            color='rgba(0, 0, 255, 0.5)',
+                            line=dict(color='blue', width=1),
+                            symbol='circle'
+                        ),
+                        name=f'{vol_size}sh',
+                        legendgroup='lots',
+                        hovertemplate=(
+                            f'<b>{vol_size} shares</b><br>' +
+                            'Time: %{x}<br>' +
+                            'Price: $%{y:.2f}<br>' +
+                            '<extra></extra>'
+                        )
+                    ),
+                    row=1, col=1
+                )
+    
+    # ===== ROW 2: Round Lot Flow Metrics =====
+    if len(round_lots) > 0:
+        # Sign-based CVD (left y-axis)
+        fig.add_trace(
+            go.Scatter(
+                x=round_lots['timestamp_str'],
+                y=round_lots['cvd'],
+                mode='lines',
+                name='Sign CVD',
+                line=dict(color='purple', width=2),
+                legendgroup='flow',
+                hovertemplate='CVD: %{y:,.0f} shares<extra></extra>'
+            ),
+            row=2, col=1,
+            secondary_y=False
+        )
+        
+        # Price-impact CVD (right y-axis)
+        fig.add_trace(
+            go.Scatter(
+                x=round_lots['timestamp_str'],
+                y=round_lots['impact_cvd'],
+                mode='lines',
+                name='Impact CVD',
+                line=dict(color='darkgreen', width=2, dash='dot'),
+                legendgroup='flow',
+                hovertemplate='Impact: %{y:,.2f}<extra></extra>'
+            ),
+            row=2, col=1,
+            secondary_y=True
+        )
+        
+        # Zero lines
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3, row=2, col=1, secondary_y=False)
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.3, row=2, col=1, secondary_y=True)
+    
+    # Add earnings event marker (both rows)
+    event_str = event_datetime.strftime('%Y-%m-%d %H:%M:%S')
+    for row in [1, 2]:
+        fig.add_vline(
+            x=event_str, 
+            line_dash="dash", 
+            line_color="blue", 
+            line_width=2,
+            row=row, col=1
+        )
+    
+    # Update axes
+    fig.update_xaxes(title_text="Time (UTC)", type="date", row=2, col=1)
+    fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+    fig.update_yaxes(title_text="Sign CVD (shares)", title_font=dict(color='purple'), row=2, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="Impact CVD (% × shares)", title_font=dict(color='darkgreen'), row=2, col=1, secondary_y=True)
+    
+    # Layout
+    fig.update_layout(
+        height=800,
+        template="plotly_white",
+        hovermode='x unified',
+        xaxis_rangeslider_visible=False,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    return fig
+
+
 def main():
+
+
     st.set_page_config(
         page_title="Trade Size Explorer",
         page_icon="🔍",
@@ -432,9 +753,19 @@ def main():
     
     st.markdown("---")
     
-    st.subheader("2. Price Action & Round Lot Trades")
+    st.subheader("2. Price Action & Round Lot Trades (Aggregated)")
     fig2 = create_candlestick_chart(event_df, bucket_col, event_datetime)
     st.plotly_chart(fig2, use_container_width=True)
+    
+    st.markdown("---")
+    st.markdown("### 📊 Post-Earnings Analysis (Second-Bar Resolution)")
+    st.markdown("---")
+    
+    st.subheader("3. Combined Price Action & Round Lot Flow")
+    st.caption("Top: Second-bar candlesticks with round lot overlay | Bottom: Flow metrics (Sign CVD & Impact CVD) | Synchronized zoom")
+    fig3 = create_second_bar_analysis_chart(event_df, event_datetime)
+    st.plotly_chart(fig3, use_container_width=True)
+
     
     # Summary statistics (on raw second bars)
     st.markdown("---")
