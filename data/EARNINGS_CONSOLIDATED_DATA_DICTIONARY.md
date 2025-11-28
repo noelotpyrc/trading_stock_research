@@ -248,3 +248,258 @@ Columns with >50% NaN are **expected** due to:
 ## File Location
 
 Production: `/Volumes/Extreme SSD/trading_data/stock/data/processed/earnings_consolidated_final.csv`
+
+---
+
+# Round Lot Features Extension
+
+**Extended Dataset**: `earnings_consolidated_with_rl.csv`  
+**Full Path**: `/Volumes/Extreme SSD/trading_data/stock/data/processed/earnings_consolidated_with_rl.csv`  
+**Created**: 2025-11-28  
+**Total Columns**: 128 (106 original + 22 round lot features)
+
+## What is a Round Lot?
+
+A **round lot** is a second bar where:
+- `num == 1`: Exactly one trade occurred in that second
+- `vol % 100 == 0`: Volume is a multiple of 100 shares (100, 200, 300, ...)
+
+### Why Round Lots Matter
+
+| Characteristic | Implication |
+|----------------|-------------|
+| Single trade per second | Likely a **deliberate human order**, not HFT noise |
+| Volume in multiples of 100 | Classic **retail or institutional** sizing pattern |
+| Low frequency (3.3% of bars) | Represents **intentional** order flow |
+
+Round lots may represent "informed" or "intentional" trading activity, contrasting with high-frequency algorithmic trading which typically produces odd lots and multiple trades per second.
+
+### Round Lot Statistics
+
+| Metric | Value |
+|--------|-------|
+| Total bars | 622,125 |
+| Round lot bars | 20,801 |
+| Round lot percentage | 3.3% |
+
+---
+
+## Round Lot Features (22 columns)
+
+### 13. Round Lot - Rolling Volume Features (10 columns)
+
+These measure round lot **activity** over rolling time windows.
+
+| Column | Type | Description | NaN % |
+|--------|------|-------------|-------|
+| `rl_vol_30s` | float64 | Rolling sum of round lot volume (30s window) | 9.2% |
+| `rl_vol_60s` | float64 | Rolling sum of round lot volume (60s window) | 3.5% |
+| `rl_vol_120s` | float64 | Rolling sum of round lot volume (120s window) | 1.6% |
+| `rl_vol_300s` | float64 | Rolling sum of round lot volume (5min window) | 0.8% |
+| `rl_vol_600s` | float64 | Rolling sum of round lot volume (10min window) | 0.6% |
+| `rl_vol_pct_30s` | float64 | Round lot volume as % of total volume (30s) | 9.2% |
+| `rl_vol_pct_60s` | float64 | Round lot volume as % of total volume (60s) | 3.5% |
+| `rl_vol_pct_120s` | float64 | Round lot volume as % of total volume (120s) | 1.6% |
+| `rl_vol_pct_300s` | float64 | Round lot volume as % of total volume (5min) | 0.8% |
+| `rl_vol_pct_600s` | float64 | Round lot volume as % of total volume (10min) | 0.6% |
+
+#### Calculation Details
+
+**`rl_vol_{W}s`** - Rolling Round Lot Volume
+```
+1. For each bar, check if it's a round lot: (num == 1) & (vol % 100 == 0)
+2. If round lot: use vol; otherwise: use 0
+3. Sum these values over the rolling window of W seconds
+
+Pseudocode:
+  rl_vol_flag = vol if is_round_lot else 0
+  rl_vol_{W}s = sum(rl_vol_flag) over last W seconds
+```
+
+**Interpretation:**
+- High values = lots of round lot trading activity
+- Low values = quiet period for deliberate orders
+- Spikes may indicate retail/institutional reaction to news or price levels
+
+**`rl_vol_pct_{W}s`** - Rolling Round Lot Percentage
+```
+1. Calculate rl_vol_{W}s (rolling round lot volume)
+2. Calculate total_vol_{W}s = sum(vol) over last W seconds (all bars)
+3. Divide: rl_vol_{W}s / total_vol_{W}s * 100
+
+Pseudocode:
+  rl_vol_pct_{W}s = (rl_vol_{W}s / total_vol_{W}s) * 100
+```
+
+**Interpretation:**
+- High % (e.g., >50%) = market dominated by deliberate human orders
+- Low % (e.g., <10%) = market dominated by algorithmic/HFT activity
+- Changes in this ratio may signal shifts in market participant mix
+
+---
+
+### 14. Round Lot - Event-Anchored CVD Features (2 columns)
+
+These measure round lot **order flow direction** cumulative from the earnings event.
+
+| Column | Type | Description | NaN % |
+|--------|------|-------------|-------|
+| `rl_cvd_since_event` | float64 | Cumulative round lot delta since event start | 0.0% |
+| `rl_cvd_zscore` | float64 | Z-score of rl_cvd_since_event within event | 0.0% |
+
+#### Calculation Details
+
+**`rl_cvd_since_event`** - Cumulative Round Lot CVD
+```
+1. For each bar, calculate price direction: direction = sign(vw - vw_prev)
+   - vw is volume-weighted average price for the bar
+   - direction = +1 if price went up, -1 if down, 0 if unchanged
+2. Calculate delta for each bar: delta = direction * vol
+3. For round lot bars only, accumulate delta from event start:
+   - If round lot: add delta to cumulative sum
+   - If not round lot: delta contributes 0
+4. Carry forward the cumulative sum to all bars
+
+Pseudocode:
+  direction = sign(vw - vw.shift(1))
+  delta = direction * vol
+  rl_delta = delta if is_round_lot else 0
+  rl_cvd_since_event = cumsum(rl_delta) starting from event_time
+```
+
+**Interpretation:**
+- Positive = round lots are net **BUYING** since the event
+- Negative = round lots are net **SELLING** since the event
+- Tracks whether deliberate human orders are accumulating or distributing
+
+**`rl_cvd_zscore`** - Round Lot CVD Z-Score
+```
+1. For each event, collect all rl_cvd_since_event values
+2. Calculate event_mean = mean(rl_cvd_since_event) for that event
+3. Calculate event_std = std(rl_cvd_since_event) for that event
+4. For each bar: rl_cvd_zscore = (rl_cvd_since_event - event_mean) / event_std
+
+Pseudocode:
+  event_mean = mean(rl_cvd_since_event) within event
+  event_std = std(rl_cvd_since_event) within event
+  rl_cvd_zscore = (rl_cvd_since_event - event_mean) / event_std
+```
+
+**Interpretation:**
+- Values > 2: Unusually strong round lot **buying pressure**
+- Values < -2: Unusually strong round lot **selling pressure**
+- Normalizes across events with different volatility levels
+
+---
+
+### 15. Round Lot - Rolling CVD Ratio & Direction Features (10 columns)
+
+These measure round lot **order flow relative to total flow** over rolling windows.
+
+| Column | Type | Description | NaN % |
+|--------|------|-------------|-------|
+| `rl_cvd_ratio_30s` | float64 | Round lot CVD / Total CVD (30s window) | 9.2% |
+| `rl_cvd_ratio_60s` | float64 | Round lot CVD / Total CVD (60s window) | 3.5% |
+| `rl_cvd_ratio_120s` | float64 | Round lot CVD / Total CVD (120s window) | 1.6% |
+| `rl_cvd_ratio_300s` | float64 | Round lot CVD / Total CVD (5min window) | 0.8% |
+| `rl_cvd_ratio_600s` | float64 | Round lot CVD / Total CVD (10min window) | 0.6% |
+| `rl_direction_30s` | float64 | Round lot flow direction (30s): +1/-1/0 | 9.2% |
+| `rl_direction_60s` | float64 | Round lot flow direction (60s): +1/-1/0 | 3.5% |
+| `rl_direction_120s` | float64 | Round lot flow direction (120s): +1/-1/0 | 1.6% |
+| `rl_direction_300s` | float64 | Round lot flow direction (5min): +1/-1/0 | 0.8% |
+| `rl_direction_600s` | float64 | Round lot flow direction (10min): +1/-1/0 | 0.6% |
+
+#### Calculation Details
+
+**`rl_cvd_ratio_{W}s`** - Rolling Round Lot CVD Ratio
+```
+1. Calculate delta for each bar: delta = sign(vw - vw_prev) * vol
+2. Calculate rl_delta: delta if is_round_lot else 0
+3. Sum rl_delta over rolling window: rl_cvd_{W}s = sum(rl_delta) over last W seconds
+4. Sum delta over rolling window: total_cvd_{W}s = sum(delta) over last W seconds
+5. Divide with epsilon to avoid division by zero:
+   rl_cvd_ratio_{W}s = rl_cvd_{W}s / (total_cvd_{W}s + epsilon)
+
+Pseudocode:
+  delta = sign(vw - vw.shift(1)) * vol
+  rl_delta = delta if is_round_lot else 0
+  rl_cvd_{W}s = sum(rl_delta) over last W seconds
+  total_cvd_{W}s = sum(delta) over last W seconds
+  rl_cvd_ratio_{W}s = rl_cvd_{W}s / (total_cvd_{W}s + epsilon)
+```
+
+**Interpretation:**
+- `> 1`: Round lots **more directional** than overall market
+- `≈ 1`: Round lots aligned with market
+- `< 1` (same sign): Round lots less directional than market
+- **Opposite signs**: Round lots trading **AGAINST** the market (potential reversal signal)
+
+**`rl_direction_{W}s`** - Rolling Round Lot Direction
+```
+1. Calculate rl_cvd_{W}s = sum(rl_delta) over last W seconds
+2. Apply sign function: +1 if positive, -1 if negative, 0 if zero
+
+Pseudocode:
+  rl_direction_{W}s = sign(rl_cvd_{W}s)
+```
+
+**Interpretation:**
+- `+1`: Round lots net **BUYING** in the recent window
+- `-1`: Round lots net **SELLING** in the recent window
+- `0`: Round lots balanced (no net direction)
+
+---
+
+## Usage Examples
+
+### Analyzing Round Lot Activity
+
+```python
+# High round lot activity periods
+high_rl_activity = df[df['rl_vol_pct_60s'] > 30]  # >30% of volume from round lots
+
+# Round lots diverging from market
+divergence = df[
+    (df['rl_direction_60s'] == 1) &  # Round lots buying
+    (df['cvd_zscore'] < -1)           # But overall market selling
+]
+```
+
+### Round Lot Flow Analysis
+
+```python
+# Strong round lot buying pressure
+strong_rl_buying = df[df['rl_cvd_zscore'] > 2]
+
+# Round lots driving the market (ratio > 1)
+rl_driven = df[df['rl_cvd_ratio_120s'] > 1]
+```
+
+### Combining with Targets
+
+```python
+# Correlation between round lot features and forward returns
+rl_features = ['rl_vol_pct_60s', 'rl_cvd_zscore', 'rl_cvd_ratio_60s', 'rl_direction_60s']
+targets = ['target_ret_10s', 'target_ret_20s', 'target_ret_30s']
+
+correlations = df[rl_features + targets].corr()[targets].loc[rl_features]
+```
+
+---
+
+## Feature Generation Script
+
+**Script**: `feature_engineering/add_round_lot_features.py`
+
+**Usage**:
+```bash
+python feature_engineering/add_round_lot_features.py \
+  --input /path/to/earnings_consolidated_final.csv \
+  --output /path/to/earnings_consolidated_with_rl.csv \
+  --windows 30,60,120,300,600 \
+  --min-periods 10
+```
+
+**Parameters**:
+- `--windows`: Comma-separated list of rolling window sizes in seconds
+- `--min-periods`: Minimum observations in window to produce a value (default: 10)
