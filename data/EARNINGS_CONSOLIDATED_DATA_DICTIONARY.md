@@ -173,7 +173,7 @@ Z-score normalizes CVD relative to its behavior within the same event, making ex
 
 **Edge Cases**:
 - When `high == low` (no price movement), position = 0.0 to avoid division by zero
-- Early bars in each event have NaN for `cvd_since_event` and `cvd_zscore` (51.7% NaN) as they require sufficient data for calculation
+- Bars before the event have NaN for `cvd_since_event` and `cvd_zscore` (51.7% NaN) as defined in the calculation method
 
 ### 8. Baseline Statistics (22 columns)
 Pre-earning period statistics for adaptive thresholds.
