@@ -124,6 +124,57 @@ Cumulative volume delta and momentum indicators.
 | `delta_20s` | float64 | Rolling 20-bar delta sum | 0.0% |
 | `delta_10s` | float64 | Rolling 10-bar delta sum | 0.0% |
 
+#### CVD Calculation Methodology
+
+**Delta** estimates buying vs selling pressure for each 1-second bar based on where the close price sits within the high-low range.
+
+**Formula**:
+```
+position = (close - midpoint) / half_range
+
+where:
+  midpoint = (high + low) / 2
+  half_range = (high - low) / 2
+
+delta = volume × position
+```
+
+**Position Range**: Continuous real number from **-1.0** (maximum selling) to **+1.0** (maximum buying)
+
+| Position | Interpretation | Close Location |
+|----------|---------------|----------------|
+| +1.0 | Strong buying pressure | Close = High |
+| +0.5 | Moderate buying | Close between mid and high |
+| 0.0 | Neutral | Close = Midpoint or High = Low |
+| -0.5 | Moderate selling | Close between mid and low |
+| -1.0 | Strong selling pressure | Close = Low |
+
+**Example**:
+- Bar: High=$100, Low=$96, Close=$99, Volume=10,000
+- Midpoint = $98, Half Range = $2
+- Position = (99 - 98) / 2 = **+0.5**
+- Delta = 10,000 × 0.5 = **+5,000** (buying pressure)
+
+**Cumulative Volume Delta (CVD)**:
+```
+cvd_since_event = cumsum(delta) from earnings announcement time
+```
+
+CVD accumulates delta values starting from the earnings announcement timestamp, providing a running total of net buying/selling pressure during the event window.
+
+**CVD Z-Score**:
+```
+cvd_zscore = (cvd - rolling_mean) / rolling_std
+
+where rolling statistics are calculated within each earnings event
+```
+
+Z-score normalizes CVD relative to its behavior within the same event, making extreme values comparable across different tickers and events. Values above +2 or below -2 indicate strong directional pressure.
+
+**Edge Cases**:
+- When `high == low` (no price movement), position = 0.0 to avoid division by zero
+- Early bars in each event have NaN for `cvd_since_event` and `cvd_zscore` (51.7% NaN) as they require sufficient data for calculation
+
 ### 8. Baseline Statistics (22 columns)
 Pre-earning period statistics for adaptive thresholds.
 
