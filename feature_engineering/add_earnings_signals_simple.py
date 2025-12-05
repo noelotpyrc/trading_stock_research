@@ -1,3 +1,13 @@
+"""
+Simplified earnings signals for CVD analysis.
+
+Only calculates:
+- Event-specific features (CVD, VWAP, OR, impulse, etc.)
+- Forward return targets (no MFE/MAE, no hit targets)
+
+For extended window analysis (0-120 min post-event).
+"""
+
 import pandas as pd
 import numpy as np
 import argparse
@@ -10,21 +20,22 @@ from feature_engineering.microstructure import (
     get_opening_range, detect_impulse_bar
 )
 from feature_engineering.windows import get_time_window_mask
-from feature_engineering.targets import (
-    get_forward_returns, get_max_excursion, get_hit_target_pct, get_first_touch_target
-)
+from feature_engineering.targets import get_forward_returns
 
-def add_earnings_signals(input_file, output_file, pre_labeled=True, window_filter='event_plus_minus_30m'):
+
+def add_earnings_signals_simple(input_file, output_file, pre_labeled=True, 
+                                 window_filter='event_0_to_120m',
+                                 return_horizons=[10, 20, 30, 60, 120, 240, 600]):
     """
-    Calculates event-specific metadata and targets for earnings strategies.
-    Outputs ONLY rows within event windows.
+    Calculates event-specific features and forward return targets.
+    Simplified version - no MFE/MAE, no hit targets, no strategy signals.
     
     Args:
         input_file: Path to input CSV (either raw OHLCV or pre-labeled)
         output_file: Path to output CSV
-        pre_labeled: If True, assumes input has window labels. If False, labels on the fly.
-        window_filter: Column name for window filter (default: 'event_plus_minus_30m')
-                      Options: 'event_plus_minus_30m', 'event_0_to_120m', etc.
+        pre_labeled: If True, assumes input has window labels
+        window_filter: Column name for window filter (default: 'event_0_to_120m')
+        return_horizons: List of forward return horizons in seconds
     """
     print(f"Processing {input_file}...")
     
@@ -48,9 +59,8 @@ def add_earnings_signals(input_file, output_file, pre_labeled=True, window_filte
     df['acceptance_datetime_utc'] = pd.to_datetime(df['acceptance_datetime_utc'], utc=True)
 
     # Label windows if not pre-labeled
-    if not pre_labeled or 'event_plus_minus_30m' not in df.columns:
+    if not pre_labeled or window_filter not in df.columns:
         print("Labeling event windows...")
-        # Save to temp file, then reload (simpler than refactoring label_windows to return df)
         temp_labeled = input_file.replace('.csv', '_temp_labeled.csv')
         label_windows(input_file, temp_labeled)
         df = pd.read_csv(temp_labeled)
@@ -118,7 +128,7 @@ def add_earnings_signals(input_file, output_file, pre_labeled=True, window_filte
                 df.loc[event_mask, 'impulse_high'] = first_impulse['high']
                 df.loc[event_mask, 'impulse_low'] = first_impulse['low']
                 
-            # First 5m Stats using get_time_window_mask
+            # First 5m Stats
             five_min_mask = get_time_window_mask(event_slice, event_time, duration_seconds=300)
             five_min_slice = event_slice[five_min_mask]
             
@@ -135,58 +145,40 @@ def add_earnings_signals(input_file, output_file, pre_labeled=True, window_filte
             
             # --- NORMALIZED FEATURES ---
             
-            # 1. Opening Range Width (% of event price)
+            # Opening Range Width (% of event price)
             if or_high is not None and or_low is not None and event_price > 0:
                 or_width_pct = (or_high - or_low) / event_price
                 df.loc[event_mask, 'or_width_pct'] = or_width_pct
             
-            # 2. CVD as % of cumulative volume
+            # CVD as % of cumulative volume
             if not cvd_series.isna().all():
-                # Calculate cumulative volume for entire slice
                 cum_vol = event_slice['vol'].cumsum()
-                
-                # CVD normalized by cumulative volume (align by index)
                 cvd_pct = cvd_series.values / np.where(cum_vol.values > 0, cum_vol.values, 1)
                 df.loc[event_mask, 'cvd_pct_volume'] = cvd_pct
             
-            # 3. VWAP Distance from Event Price (%)
+            # VWAP Distance from Event Price (%)
             if not vwap_series.isna().all() and event_price > 0:
                 vwap_distance_pct = (vwap_series - event_price) / event_price
                 df.loc[event_mask, 'vwap_distance_pct'] = vwap_distance_pct
             
-            # 4. First 5m Range (% of event price)
+            # First 5m Range (% of event price)
             first_5m_high = df.loc[event_mask, 'first_5m_high'].iloc[0]
             first_5m_low = df.loc[event_mask, 'first_5m_low'].iloc[0]
             if pd.notna(first_5m_high) and pd.notna(first_5m_low) and event_price > 0:
                 first_5m_range_pct = (first_5m_high - first_5m_low) / event_price
                 df.loc[event_mask, 'first_5m_range_pct'] = first_5m_range_pct
             
-            # 5. Impulse Bar Range (% of event price)
+            # Impulse Bar Range (% of event price)
             impulse_high = df.loc[event_mask, 'impulse_high'].iloc[0]
             impulse_low = df.loc[event_mask, 'impulse_low'].iloc[0]
             if pd.notna(impulse_high) and pd.notna(impulse_low) and event_price > 0:
                 impulse_range_pct = (impulse_high - impulse_low) / event_price
                 df.loc[event_mask, 'impulse_range_pct'] = impulse_range_pct
 
-    # --- Targets ---
-    print("Calculating targets...")
-    
-    # Forward Returns (Shorter intervals for earnings reactions)
-    # 10s, 20s, 30s, 1m, 2m, 4m, 10m
-    returns_df = get_forward_returns(df, horizons_seconds=[10, 20, 30, 60, 120, 240, 600])
+    # --- Forward Return Targets Only ---
+    print(f"Calculating forward return targets: {return_horizons}...")
+    returns_df = get_forward_returns(df, horizons_seconds=return_horizons)
     df = pd.concat([df, returns_df], axis=1)
-    
-    # Max Excursion (30m window - capped to event reaction period)
-    excursion_df = get_max_excursion(df, window_seconds=1800, min_periods=60)
-    df = pd.concat([df, excursion_df], axis=1)
-    
-    # Hit Target % (30m window)
-    df['hit_1pct_30m'] = get_hit_target_pct(df, target_pct=0.01, window_seconds=1800)
-    df['hit_2pct_30m'] = get_hit_target_pct(df, target_pct=0.02, window_seconds=1800)
-    
-    # First Touch Targets (TP/SL) - 30m window capped to event reaction
-    df['target_1R_1pct'] = get_first_touch_target(df, tp_pct=0.01, sl_pct=0.01, window_seconds=1800)
-    df['target_2R_1pct'] = get_first_touch_target(df, tp_pct=0.02, sl_pct=0.01, window_seconds=1800)
 
     # --- Filter Output to Event Windows Only ---
     print(f"Filtering to event windows ({window_filter})...")
@@ -205,15 +197,18 @@ def add_earnings_signals(input_file, output_file, pre_labeled=True, window_filte
     df_filtered.to_csv(output_file, index=False)
     print("Done.")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Add signals and targets to labeled OHLCV data.")
+    parser = argparse.ArgumentParser(description="Add simplified signals and targets to OHLCV data.")
     parser.add_argument("input_file", help="Path to input CSV file")
     parser.add_argument("output_file", help="Path to output CSV file")
     parser.add_argument("--pre-labeled", action='store_true', default=True,
                         help="Input already has window labels (default: True)")
-    parser.add_argument("--window-filter", type=str, default='event_plus_minus_30m',
-                        help="Window column to filter by (default: event_plus_minus_30m)")
+    parser.add_argument("--window-filter", type=str, default='event_0_to_120m',
+                        help="Window column to filter by (default: event_0_to_120m)")
     
     args = parser.parse_args()
     
-    add_earnings_signals(args.input_file, args.output_file, args.pre_labeled, args.window_filter)
+    add_earnings_signals_simple(args.input_file, args.output_file, args.pre_labeled, args.window_filter)
+
+

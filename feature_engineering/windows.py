@@ -64,6 +64,13 @@ def get_window_masks(df, event_time_utc):
     
     masks['event_plus_30_to_120m'] = (ts_utc > w3_start) & (ts_utc <= w3_end)
     
+    # --- Window: Event 0 to +120 mins (post-event extended) ---
+    w_ext_start = event_ts
+    w_ext_end_nominal = event_ts + pd.Timedelta(minutes=120)
+    w_ext_end = min(w_ext_end_nominal, w3_cutoff)
+    
+    masks['event_0_to_120m'] = (ts_utc >= w_ext_start) & (ts_utc <= w_ext_end)
+    
     # --- Window 4: Next Open +/- 30 mins ---
     next_open_et = get_next_open(event_et)
     next_open_utc = next_open_et.tz_convert('UTC')

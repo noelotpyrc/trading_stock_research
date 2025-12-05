@@ -41,6 +41,7 @@ def add_features(input_file, output_file, n_before=5, n_after=5):
     window_cols = [
         'event_plus_minus_30m', 
         'event_plus_30_to_120m', 
+        'event_0_to_120m',
         'next_open_plus_minus_30m',
         col_n_before,
         col_n_after
@@ -71,6 +72,7 @@ def add_features(input_file, output_file, n_before=5, n_after=5):
         
         df.loc[event_rows, 'event_plus_minus_30m'] = fixed_masks['event_plus_minus_30m'][event_rows]
         df.loc[event_rows, 'event_plus_30_to_120m'] = fixed_masks['event_plus_30_to_120m'][event_rows]
+        df.loc[event_rows, 'event_0_to_120m'] = fixed_masks['event_0_to_120m'][event_rows]
         df.loc[event_rows, 'next_open_plus_minus_30m'] = fixed_masks['next_open_plus_minus_30m'][event_rows]
         df.loc[event_rows, col_n_before] = mask_before[event_rows]
         df.loc[event_rows, col_n_after] = mask_after[event_rows]

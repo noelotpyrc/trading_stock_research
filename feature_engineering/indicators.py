@@ -39,6 +39,38 @@ def estimate_delta(df):
     delta = volume * position
     return pd.Series(delta, index=df.index, name='delta')
 
+def calculate_delta_vw(df):
+    """
+    Calculates volume delta using volume-weighted price (vw) tick rule.
+    
+    Uses a simple tick classification:
+    - If vw increases → buy pressure → delta = +volume
+    - If vw decreases → sell pressure → delta = -volume  
+    - If vw unchanged → neutral → delta = 0
+    
+    First bar in sequence will have delta=0 (no previous price to compare).
+    
+    Args:
+        df: DataFrame with 'vw' (volume-weighted price) and 'vol' columns,
+            should be sorted by timestamp
+            
+    Returns:
+        Series with delta values (positive = buy pressure, negative = sell pressure)
+    """
+    # Calculate vw price change
+    vw_change = df['vw'].diff()
+    
+    # Classify direction: +1 (up tick), -1 (down tick), 0 (no change or first bar)
+    direction = np.sign(vw_change)
+    
+    # Handle NaN from first diff (set to 0)
+    direction = direction.fillna(0)
+    
+    # Calculate delta
+    delta = df['vol'] * direction
+    
+    return pd.Series(delta, index=df.index, name='delta')
+
 def calculate_cvd(df, start_time=None):
     """
     Calculates Cumulative Volume Delta (CVD).
