@@ -243,12 +243,14 @@ def main():
     st.sidebar.caption(f"Events: {filtered_df.groupby(['ticker', 'acceptance_datetime_utc']).ngroups}")
 
     # ========== MAIN CONTENT ==========
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 All Events (by Ticker)",
         "🔍 Single Event",
         "📈 Event Correlation Explorer",
         "🎯 Strategy Group Analysis",
-        "📉 Ticker Correlations"
+        "📉 Ticker Correlations",
+        "📐 VWAP Deviation Analysis",
+        "🔬 Pattern Analysis"
     ])
     
     # ========== TAB 1: Events by Ticker ==========
@@ -1136,6 +1138,854 @@ def main():
                     st.markdown("**Most Positive (Momentum)**")
                     top_pos = corr_df.nlargest(5, 'Correlation')[['Ticker', 'Correlation', 'N_Events']]
                     st.dataframe(top_pos.style.format({'Correlation': '{:.4f}'}), use_container_width=True)
+
+    # ========== TAB 6: VWAP Deviation Analysis ==========
+    with tab6:
+        st.markdown("### VWAP Deviation Analysis")
+        st.markdown("Explore how VWAP deviation evolves over time and its relationship with CVD-return correlations")
+        
+        # Use 2024/2025 data
+        df_vwap = df.copy()
+        df_vwap = df_vwap[df_vwap['year'].isin([2024, 2025])]
+        
+        if 'vwap_since_event' not in df_vwap.columns:
+            st.error("VWAP data not available in dataset.")
+        else:
+            # CVD correlation window selector
+            vwap_corr_windows = {
+                "5m-30m": (300, 1800),
+                "5m-60m": (300, 3600),
+                "30m-60m": (1800, 3600)
+            }
+            
+            selected_vwap_window = st.selectbox(
+                "CVD correlation window",
+                options=list(vwap_corr_windows.keys()),
+                index=0,
+                key="vwap_corr_window"
+            )
+            
+            # Calculate VWAP deviation at each minute (1-15m) and CVD correlation for each event
+            vwap_time_points = list(range(1, 16))  # 1m to 15m
+            min_samples_vwap = 10
+            
+            event_data = []
+            win_start_v, win_end_v = vwap_corr_windows[selected_vwap_window]
+            
+            for (ticker, evt), grp in df_vwap.groupby(['ticker', 'acceptance_datetime_utc']):
+                grp = grp.sort_values('seconds_since_event')
+                
+                # Calculate CVD vs 10min return correlation
+                corr_slice = grp[(grp['seconds_since_event'] >= win_start_v) & (grp['seconds_since_event'] <= win_end_v)]
+                cvd_corr = np.nan
+                if len(corr_slice) >= min_samples_vwap and 'target_ret_600s' in grp.columns:
+                    corr_df_v = corr_slice[['cvd_zscore', 'target_ret_600s']].dropna()
+                    if len(corr_df_v) >= min_samples_vwap:
+                        cvd_corr = corr_df_v.corr().iloc[0, 1]
+                
+                if np.isnan(cvd_corr):
+                    continue
+                
+                # Calculate VWAP deviation at each time point
+                vwap_devs = {}
+                for t_min in vwap_time_points:
+                    t_sec = t_min * 60
+                    slice_t = grp[grp['seconds_since_event'] <= t_sec]
+                    if slice_t.empty:
+                        vwap_devs[f'vwap_dev_{t_min}m'] = np.nan
+                        continue
+                    
+                    last_row = slice_t.iloc[-1]
+                    price = last_row.get('close', np.nan)
+                    vwap = last_row.get('vwap_since_event', np.nan)
+                    
+                    if pd.notna(price) and pd.notna(vwap) and price > 0:
+                        vwap_devs[f'vwap_dev_{t_min}m'] = abs(price - vwap) / price * 100
+                    else:
+                        vwap_devs[f'vwap_dev_{t_min}m'] = np.nan
+                
+                event_data.append({
+                    'ticker': ticker,
+                    'event': evt,
+                    'cvd_corr': cvd_corr,
+                    **vwap_devs
+                })
+            
+            if not event_data:
+                st.warning("No sufficient data for VWAP deviation analysis.")
+            else:
+                vwap_df = pd.DataFrame(event_data)
+                
+                # Classify events by correlation strength
+                def classify_corr(c):
+                    if c < -0.4:
+                        return "Strong MR"
+                    elif c < -0.15:
+                        return "Moderate MR"
+                    elif c < 0.15:
+                        return "No Signal"
+                    else:
+                        return "Momentum"
+                
+                vwap_df['corr_group'] = vwap_df['cvd_corr'].apply(classify_corr)
+                
+                st.markdown(f"**Events analyzed:** {len(vwap_df)}")
+                
+                # ---- Chart 1: Heatmap - Correlation between VWAP dev @ each minute and CVD correlation ----
+                st.markdown("---")
+                st.markdown("#### Correlation: VWAP Deviation vs CVD-Return Correlation")
+                st.markdown("Shows how VWAP deviation at each time point correlates with the CVD-10min return correlation")
+                
+                heatmap_corrs = []
+                for t_min in vwap_time_points:
+                    col_name = f'vwap_dev_{t_min}m'
+                    valid = vwap_df[[col_name, 'cvd_corr']].dropna()
+                    if len(valid) >= 20:
+                        corr = valid.corr().iloc[0, 1]
+                    else:
+                        corr = np.nan
+                    heatmap_corrs.append({'Time': f'{t_min}m', 'Correlation': corr})
+                
+                heatmap_df = pd.DataFrame(heatmap_corrs)
+                
+                fig_bar = px.bar(
+                    heatmap_df,
+                    x='Time',
+                    y='Correlation',
+                    color='Correlation',
+                    color_continuous_scale='RdBu_r',
+                    color_continuous_midpoint=0,
+                    title=f"Corr(VWAP_dev@Xm, CVD_corr[{selected_vwap_window}])",
+                    labels={'Correlation': 'Correlation'}
+                )
+                fig_bar.add_hline(y=0, line_dash="dot", line_color="gray")
+                fig_bar.update_layout(height=350, template='plotly_white')
+                st.plotly_chart(fig_bar, use_container_width=True, key="vwap_corr_bar")
+                
+                # ---- Chart 2: Trajectory by correlation group ----
+                st.markdown("---")
+                st.markdown("#### VWAP Deviation Trajectories by Strategy Group")
+                st.markdown("Mean VWAP deviation over time, grouped by CVD correlation strength")
+                
+                # Reshape for plotting
+                trajectory_data = []
+                for _, row in vwap_df.iterrows():
+                    for t_min in vwap_time_points:
+                        val = row.get(f'vwap_dev_{t_min}m', np.nan)
+                        if not np.isnan(val):
+                            trajectory_data.append({
+                                'Time (min)': t_min,
+                                'VWAP Deviation %': val,
+                                'Group': row['corr_group'],
+                                'ticker': row['ticker']
+                            })
+                
+                traj_df = pd.DataFrame(trajectory_data)
+                
+                if not traj_df.empty:
+                    # Calculate mean and std per group per time
+                    traj_summary = traj_df.groupby(['Time (min)', 'Group'])['VWAP Deviation %'].agg(['mean', 'std', 'count']).reset_index()
+                    
+                    group_order = ["Strong MR", "Moderate MR", "No Signal", "Momentum"]
+                    group_colors = {"Strong MR": "#ef4444", "Moderate MR": "#f97316", "No Signal": "#6b7280", "Momentum": "#22c55e"}
+                    
+                    fig_traj = px.line(
+                        traj_summary,
+                        x='Time (min)',
+                        y='mean',
+                        color='Group',
+                        color_discrete_map=group_colors,
+                        category_orders={'Group': group_order},
+                        markers=True,
+                        title="Mean VWAP Deviation Over Time by Strategy Group",
+                        labels={'mean': 'Mean VWAP Deviation %'}
+                    )
+                    fig_traj.update_layout(
+                        height=450,
+                        template='plotly_white',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                    )
+                    st.plotly_chart(fig_traj, use_container_width=True, key="vwap_trajectory")
+                    
+                    # Group counts
+                    group_counts = vwap_df['corr_group'].value_counts()
+                    st.caption(f"Group sizes: {', '.join([f'{g}: {group_counts.get(g, 0)}' for g in group_order])}")
+                
+                # ---- Chart 3: Scatter plots at key time points ----
+                st.markdown("---")
+                st.markdown("#### Scatter: VWAP Deviation vs CVD Correlation")
+                
+                scatter_times = st.multiselect(
+                    "Select time points to visualize",
+                    options=[f'{t}m' for t in vwap_time_points],
+                    default=['3m', '5m', '10m'],
+                    key="vwap_scatter_times"
+                )
+                
+                if scatter_times:
+                    n_plots = len(scatter_times)
+                    cols = st.columns(min(n_plots, 3))
+                    
+                    for i, t_str in enumerate(scatter_times):
+                        col_name = f'vwap_dev_{t_str}'
+                        plot_data = vwap_df[[col_name, 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                        
+                        if not plot_data.empty:
+                            with cols[i % 3]:
+                                fig_scatter = px.scatter(
+                                    plot_data,
+                                    x=col_name,
+                                    y='cvd_corr',
+                                    color='corr_group',
+                                    color_discrete_map=group_colors,
+                                    category_orders={'corr_group': group_order},
+                                    hover_data=['ticker'],
+                                    title=f"VWAP Dev @ {t_str}",
+                                    labels={col_name: f'VWAP Dev % @ {t_str}', 'cvd_corr': 'CVD Correlation'}
+                                )
+                                fig_scatter.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                                fig_scatter.update_layout(
+                                    height=350,
+                                    template='plotly_white',
+                                    showlegend=False
+                                )
+                                st.plotly_chart(fig_scatter, use_container_width=True, key=f"vwap_scatter_{t_str}")
+                                
+                                # Show correlation
+                                corr_val = plot_data[[col_name, 'cvd_corr']].corr().iloc[0, 1]
+                                st.caption(f"Corr: {corr_val:.3f} (n={len(plot_data)})")
+                
+                # ---- Summary stats table ----
+                st.markdown("---")
+                st.markdown("#### Summary Statistics by Group")
+                
+                summary_rows = []
+                for group in group_order:
+                    group_data = vwap_df[vwap_df['corr_group'] == group]
+                    if len(group_data) == 0:
+                        continue
+                    row = {'Group': group, 'N Events': len(group_data)}
+                    for t_min in [3, 5, 10, 15]:
+                        col = f'vwap_dev_{t_min}m'
+                        if col in group_data.columns:
+                            row[f'VWAP Dev @{t_min}m'] = group_data[col].mean()
+                    row['Mean CVD Corr'] = group_data['cvd_corr'].mean()
+                    summary_rows.append(row)
+                
+                if summary_rows:
+                    summary_df = pd.DataFrame(summary_rows)
+                    st.dataframe(
+                        summary_df.style.format({
+                            'VWAP Dev @3m': '{:.3f}%',
+                            'VWAP Dev @5m': '{:.3f}%',
+                            'VWAP Dev @10m': '{:.3f}%',
+                            'VWAP Dev @15m': '{:.3f}%',
+                            'Mean CVD Corr': '{:.3f}'
+                        }),
+                        use_container_width=True
+                    )
+
+    # ========== TAB 7: Pattern Analysis ==========
+    with tab7:
+        st.markdown("### 🔬 Pattern Analysis")
+        st.markdown("Explore CVD velocity, price-CVD divergence, and return autocorrelation patterns")
+        
+        # Use 2024/2025 data
+        df_pattern = df.copy()
+        df_pattern = df_pattern[df_pattern['year'].isin([2024, 2025])]
+        
+        # CVD correlation window selector
+        pattern_corr_windows = {
+            "5m-30m": (300, 1800),
+            "5m-60m": (300, 3600),
+            "30m-60m": (1800, 3600)
+        }
+        
+        selected_pattern_window = st.selectbox(
+            "CVD correlation window for comparison",
+            options=list(pattern_corr_windows.keys()),
+            index=0,
+            key="pattern_corr_window"
+        )
+        
+        min_samples_pattern = 10
+        win_start_p, win_end_p = pattern_corr_windows[selected_pattern_window]
+        
+        # Calculate pattern features for each event
+        pattern_data = []
+        
+        for (ticker, evt), grp in df_pattern.groupby(['ticker', 'acceptance_datetime_utc']):
+            grp = grp.sort_values('seconds_since_event')
+            
+            # Calculate CVD vs 10min return correlation
+            corr_slice = grp[(grp['seconds_since_event'] >= win_start_p) & (grp['seconds_since_event'] <= win_end_p)]
+            cvd_corr = np.nan
+            if len(corr_slice) >= min_samples_pattern and 'target_ret_600s' in grp.columns:
+                corr_df_p = corr_slice[['cvd_zscore', 'target_ret_600s']].dropna()
+                if len(corr_df_p) >= min_samples_pattern:
+                    cvd_corr = corr_df_p.corr().iloc[0, 1]
+            
+            if np.isnan(cvd_corr):
+                continue
+            
+            # Get first 5m data
+            slice_5m = grp[grp['seconds_since_event'] <= 300]
+            if len(slice_5m) < 5:
+                continue
+            
+            # ============ FEATURE 1: CVD Velocity & Acceleration ============
+            # CVD at different time points
+            cvd_vals = slice_5m['cvd_since_event'].dropna()
+            if len(cvd_vals) < 3:
+                cvd_velocity = np.nan
+                cvd_acceleration = np.nan
+                cvd_smoothness = np.nan
+            else:
+                # Velocity: overall slope (final - initial) / time
+                cvd_start = cvd_vals.iloc[0] if len(cvd_vals) > 0 else 0
+                cvd_end = cvd_vals.iloc[-1] if len(cvd_vals) > 0 else 0
+                cvd_velocity = cvd_end - cvd_start  # Net CVD change in 5m
+                
+                # Acceleration: compare first half vs second half velocity
+                mid_idx = len(cvd_vals) // 2
+                first_half = cvd_vals.iloc[:mid_idx]
+                second_half = cvd_vals.iloc[mid_idx:]
+                
+                if len(first_half) > 1 and len(second_half) > 1:
+                    vel_1st = first_half.iloc[-1] - first_half.iloc[0]
+                    vel_2nd = second_half.iloc[-1] - second_half.iloc[0]
+                    cvd_acceleration = vel_2nd - vel_1st  # Positive = speeding up
+                else:
+                    cvd_acceleration = np.nan
+                
+                # Smoothness: ratio of |net change| to sum of |changes| (already have this as monotonicity)
+                diffs = cvd_vals.diff().dropna()
+                if len(diffs) > 0 and diffs.abs().sum() > 0:
+                    cvd_smoothness = abs(diffs.sum()) / diffs.abs().sum()
+                else:
+                    cvd_smoothness = np.nan
+            
+            # CVD reversal count
+            if len(cvd_vals) >= 3:
+                diffs = cvd_vals.diff().dropna()
+                signs = np.sign(diffs)
+                sign_changes = (signs.diff().abs() > 0).sum()
+                cvd_reversals = sign_changes
+            else:
+                cvd_reversals = np.nan
+            
+            # ============ FEATURE 2: Price-CVD Divergence ============
+            # Price return in first 5m
+            event_price = grp['event_price'].iloc[0] if 'event_price' in grp.columns else np.nan
+            if pd.notna(event_price) and event_price > 0 and len(slice_5m) > 0:
+                price_5m = slice_5m['close'].iloc[-1]
+                price_return_5m = (price_5m - event_price) / event_price * 100
+            else:
+                price_return_5m = np.nan
+            
+            # CVD value at 5m
+            cvd_5m = cvd_vals.iloc[-1] if len(cvd_vals) > 0 else np.nan
+            
+            # Divergence: sign disagreement
+            if pd.notna(price_return_5m) and pd.notna(cvd_5m):
+                price_cvd_sign_match = np.sign(price_return_5m) == np.sign(cvd_5m)
+                # Divergence score: price moved one way, CVD moved the other
+                divergence_score = price_return_5m * (-np.sign(cvd_5m)) if cvd_5m != 0 else 0
+            else:
+                price_cvd_sign_match = np.nan
+                divergence_score = np.nan
+            
+            # ============ FEATURE 3: Return Autocorrelation ============
+            # Compare early return direction with later return
+            # Get return at 2m and return at 5m mark
+            slice_2m = grp[grp['seconds_since_event'] <= 120]
+            
+            if len(slice_2m) > 0 and pd.notna(event_price) and event_price > 0:
+                price_2m = slice_2m['close'].iloc[-1]
+                return_0_2m = (price_2m - event_price) / event_price * 100
+            else:
+                return_0_2m = np.nan
+            
+            if pd.notna(price_return_5m) and pd.notna(return_0_2m):
+                return_2m_5m = price_return_5m - return_0_2m  # Return from 2m to 5m
+            else:
+                return_2m_5m = np.nan
+            
+            # Early momentum persistence: does 0-2m return predict 2-5m return?
+            if pd.notna(return_0_2m) and pd.notna(return_2m_5m) and return_0_2m != 0:
+                momentum_persistence = return_2m_5m / abs(return_0_2m)  # Positive = continuation
+            else:
+                momentum_persistence = np.nan
+            
+            # Return sign match (0-2m vs 2-5m)
+            if pd.notna(return_0_2m) and pd.notna(return_2m_5m):
+                early_return_continues = np.sign(return_0_2m) == np.sign(return_2m_5m)
+            else:
+                early_return_continues = np.nan
+            
+            # ============ FEATURE 4: Price Autocorrelation using per-bar VW (first 5m) ============
+            # Use 'vw' column - per-bar volume-weighted price (not cumulative)
+            vw_series = slice_5m['vw'].dropna() if 'vw' in slice_5m.columns else pd.Series()
+            
+            # 1. VW autocorr at lag=10, 20, 30
+            if len(vw_series) > 35:
+                vwap_autocorr_10 = vw_series.autocorr(lag=10)
+                vwap_autocorr_20 = vw_series.autocorr(lag=20)
+                vwap_autocorr_30 = vw_series.autocorr(lag=30)
+            else:
+                vwap_autocorr_10 = np.nan
+                vwap_autocorr_20 = np.nan
+                vwap_autocorr_30 = np.nan
+            
+            # 2. VW autocorr half-life (lag where autocorr drops below 0.5)
+            vwap_half_life = np.nan
+            if len(vw_series) > 60:
+                for lag in range(1, min(60, len(vw_series) - 5)):
+                    ac = vw_series.autocorr(lag=lag)
+                    if pd.notna(ac) and ac < 0.5:
+                        vwap_half_life = lag
+                        break
+                if np.isnan(vwap_half_life):
+                    vwap_half_life = 60  # Cap at 60 if never drops below 0.5
+            
+            pattern_data.append({
+                'ticker': ticker,
+                'event': evt,
+                'cvd_corr': cvd_corr,
+                # CVD Velocity/Acceleration
+                'cvd_velocity_5m': cvd_velocity,
+                'cvd_acceleration': cvd_acceleration,
+                'cvd_smoothness': cvd_smoothness,
+                'cvd_reversals': cvd_reversals,
+                # Price-CVD Divergence
+                'price_return_5m': price_return_5m,
+                'cvd_5m': cvd_5m,
+                'price_cvd_sign_match': price_cvd_sign_match,
+                'divergence_score': divergence_score,
+                # Return Autocorrelation
+                'return_0_2m': return_0_2m,
+                'return_2m_5m': return_2m_5m,
+                'momentum_persistence': momentum_persistence,
+                'early_return_continues': early_return_continues,
+                # VWAP Autocorrelation (first 5m)
+                'vwap_autocorr_10': vwap_autocorr_10,
+                'vwap_autocorr_20': vwap_autocorr_20,
+                'vwap_autocorr_30': vwap_autocorr_30,
+                'vwap_half_life': vwap_half_life
+            })
+        
+        if not pattern_data:
+            st.warning("No sufficient data for pattern analysis.")
+        else:
+            pattern_df = pd.DataFrame(pattern_data)
+            
+            # Classify by correlation strength
+            def classify_corr_p(c):
+                if c < -0.4:
+                    return "Strong MR"
+                elif c < -0.15:
+                    return "Moderate MR"
+                elif c < 0.15:
+                    return "No Signal"
+                else:
+                    return "Momentum"
+            
+            pattern_df['corr_group'] = pattern_df['cvd_corr'].apply(classify_corr_p)
+            group_order_p = ["Strong MR", "Moderate MR", "No Signal", "Momentum"]
+            group_colors_p = {"Strong MR": "#ef4444", "Moderate MR": "#f97316", "No Signal": "#6b7280", "Momentum": "#22c55e"}
+            
+            st.markdown(f"**Events analyzed:** {len(pattern_df)}")
+            
+            # ============ SECTION 1: CVD Velocity & Acceleration ============
+            st.markdown("---")
+            st.markdown("### 1️⃣ CVD Velocity & Acceleration (0-5m)")
+            st.markdown("*Does the speed/direction of early CVD predict later behavior?*")
+            
+            col1a, col1b = st.columns(2)
+            
+            with col1a:
+                # CVD Velocity vs Correlation
+                plot_vel = pattern_df[['cvd_velocity_5m', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_vel.empty:
+                    fig_vel = px.scatter(
+                        plot_vel,
+                        x='cvd_velocity_5m',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="CVD Velocity (net change in 5m) vs CVD Correlation",
+                        labels={'cvd_velocity_5m': 'CVD Velocity (0-5m)', 'cvd_corr': 'CVD-Return Corr'}
+                    )
+                    fig_vel.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_vel.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_vel.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_vel, use_container_width=True, key="pattern_cvd_velocity")
+                    corr_v = plot_vel[['cvd_velocity_5m', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_v:.3f}")
+            
+            with col1b:
+                # CVD Smoothness vs Correlation
+                plot_smooth = pattern_df[['cvd_smoothness', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_smooth.empty:
+                    fig_smooth = px.scatter(
+                        plot_smooth,
+                        x='cvd_smoothness',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="CVD Smoothness (|net|/Σ|changes|) vs CVD Correlation",
+                        labels={'cvd_smoothness': 'CVD Smoothness', 'cvd_corr': 'CVD-Return Corr'}
+                    )
+                    fig_smooth.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_smooth.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_smooth, use_container_width=True, key="pattern_cvd_smoothness")
+                    corr_s = plot_smooth[['cvd_smoothness', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_s:.3f}")
+            
+            col1c, col1d = st.columns(2)
+            
+            with col1c:
+                # CVD Acceleration vs Correlation
+                plot_acc = pattern_df[['cvd_acceleration', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_acc.empty:
+                    fig_acc = px.scatter(
+                        plot_acc,
+                        x='cvd_acceleration',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="CVD Acceleration (2nd half - 1st half velocity)",
+                        labels={'cvd_acceleration': 'CVD Acceleration', 'cvd_corr': 'CVD-Return Corr'}
+                    )
+                    fig_acc.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_acc.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_acc.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_acc, use_container_width=True, key="pattern_cvd_acceleration")
+                    corr_a = plot_acc[['cvd_acceleration', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_a:.3f}")
+            
+            with col1d:
+                # CVD Reversals vs Correlation
+                plot_rev = pattern_df[['cvd_reversals', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_rev.empty:
+                    fig_rev = px.scatter(
+                        plot_rev,
+                        x='cvd_reversals',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="CVD Reversals (direction changes in 5m)",
+                        labels={'cvd_reversals': 'CVD Reversal Count', 'cvd_corr': 'CVD-Return Corr'}
+                    )
+                    fig_rev.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_rev.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_rev, use_container_width=True, key="pattern_cvd_reversals")
+                    corr_r = plot_rev[['cvd_reversals', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_r:.3f}")
+            
+            # ============ SECTION 2: Price-CVD Divergence ============
+            st.markdown("---")
+            st.markdown("### 2️⃣ Price-CVD Divergence (0-5m)")
+            st.markdown("*When price and order flow disagree, what happens next?*")
+            
+            col2a, col2b = st.columns(2)
+            
+            with col2a:
+                # Divergence Score vs Correlation
+                plot_div = pattern_df[['divergence_score', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_div.empty:
+                    fig_div = px.scatter(
+                        plot_div,
+                        x='divergence_score',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="Price-CVD Divergence Score vs CVD Correlation",
+                        labels={'divergence_score': 'Divergence Score', 'cvd_corr': 'CVD-Return Corr'}
+                    )
+                    fig_div.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_div.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_div.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_div, use_container_width=True, key="pattern_divergence")
+                    corr_d = plot_div[['divergence_score', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_d:.3f}")
+            
+            with col2b:
+                # Sign Match distribution by group
+                plot_sign = pattern_df[['price_cvd_sign_match', 'corr_group']].dropna()
+                if not plot_sign.empty:
+                    sign_summary = plot_sign.groupby('corr_group')['price_cvd_sign_match'].mean().reset_index()
+                    sign_summary.columns = ['Group', 'Sign Match Rate']
+                    sign_summary['Sign Match Rate'] *= 100
+                    
+                    fig_sign = px.bar(
+                        sign_summary,
+                        x='Group',
+                        y='Sign Match Rate',
+                        color='Group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'Group': group_order_p},
+                        title="Price-CVD Sign Agreement Rate by Group",
+                        labels={'Sign Match Rate': 'Sign Match %'}
+                    )
+                    fig_sign.add_hline(y=50, line_dash="dot", line_color="gray", annotation_text="50%")
+                    fig_sign.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_sign, use_container_width=True, key="pattern_sign_match")
+            
+            # ============ SECTION 3: Return Autocorrelation ============
+            st.markdown("---")
+            st.markdown("### 3️⃣ Return Autocorrelation (Early vs Later)")
+            st.markdown("*Does early price momentum persist or reverse?*")
+            
+            col3a, col3b = st.columns(2)
+            
+            with col3a:
+                # 0-2m return vs 2-5m return
+                plot_ret = pattern_df[['return_0_2m', 'return_2m_5m', 'corr_group', 'ticker']].dropna()
+                if not plot_ret.empty:
+                    fig_ret = px.scatter(
+                        plot_ret,
+                        x='return_0_2m',
+                        y='return_2m_5m',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="Return 0-2m vs Return 2-5m",
+                        labels={'return_0_2m': 'Return 0-2m (%)', 'return_2m_5m': 'Return 2-5m (%)'}
+                    )
+                    fig_ret.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_ret.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_ret.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_ret, use_container_width=True, key="pattern_return_autocorr")
+                    corr_ret = plot_ret[['return_0_2m', 'return_2m_5m']].corr().iloc[0, 1]
+                    st.caption(f"Return autocorrelation: {corr_ret:.3f}")
+            
+            with col3b:
+                # Momentum Persistence vs CVD Correlation
+                plot_mom = pattern_df[['momentum_persistence', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                # Clip extreme values
+                plot_mom = plot_mom[plot_mom['momentum_persistence'].abs() < 10]
+                if not plot_mom.empty:
+                    fig_mom = px.scatter(
+                        plot_mom,
+                        x='momentum_persistence',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="Momentum Persistence vs CVD Correlation",
+                        labels={'momentum_persistence': 'Momentum Persistence', 'cvd_corr': 'CVD-Return Corr'}
+                    )
+                    fig_mom.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_mom.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_mom.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_mom, use_container_width=True, key="pattern_momentum")
+                    corr_m = plot_mom[['momentum_persistence', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_m:.3f}")
+            
+            # Early return continuation rate by group
+            plot_cont = pattern_df[['early_return_continues', 'corr_group']].dropna()
+            if not plot_cont.empty:
+                cont_summary = plot_cont.groupby('corr_group')['early_return_continues'].mean().reset_index()
+                cont_summary.columns = ['Group', 'Continuation Rate']
+                cont_summary['Continuation Rate'] *= 100
+                
+                fig_cont = px.bar(
+                    cont_summary,
+                    x='Group',
+                    y='Continuation Rate',
+                    color='Group',
+                    color_discrete_map=group_colors_p,
+                    category_orders={'Group': group_order_p},
+                    title="Early Return Continuation Rate by Group (0-2m same direction as 2-5m)",
+                    labels={'Continuation Rate': 'Continuation Rate %'}
+                )
+                fig_cont.add_hline(y=50, line_dash="dot", line_color="gray", annotation_text="50% (random)")
+                fig_cont.update_layout(height=350, template='plotly_white', showlegend=False)
+                st.plotly_chart(fig_cont, use_container_width=True, key="pattern_continuation")
+            
+            # ============ SECTION 4: VW Price Autocorrelation (first 5m) ============
+            st.markdown("---")
+            st.markdown("### 4️⃣ VW Price Autocorrelation (first 5m)")
+            st.markdown("*How persistent/choppy is per-bar volume-weighted price in the first 5 minutes?*")
+            
+            col4a, col4b = st.columns(2)
+            
+            with col4a:
+                # VWAP Autocorr at lag=10 vs CVD Correlation
+                plot_ac10 = pattern_df[['vwap_autocorr_10', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_ac10.empty:
+                    fig_ac10 = px.scatter(
+                        plot_ac10,
+                        x='vwap_autocorr_10',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="VWAP Autocorr (lag=10) vs CVD-Return Correlation",
+                        labels={'vwap_autocorr_10': 'VWAP Autocorr (lag=10)', 'cvd_corr': 'CVD-Return Corr [5-30m]'}
+                    )
+                    fig_ac10.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_ac10.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_ac10, use_container_width=True, key="pattern_vwap_autocorr_10")
+                    corr_ac10 = plot_ac10[['vwap_autocorr_10', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_ac10:.3f}")
+                else:
+                    st.info("No VWAP autocorr data available")
+            
+            with col4b:
+                # VWAP Autocorr at lag=20 vs CVD Correlation
+                plot_ac20 = pattern_df[['vwap_autocorr_20', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_ac20.empty:
+                    fig_ac20 = px.scatter(
+                        plot_ac20,
+                        x='vwap_autocorr_20',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="VWAP Autocorr (lag=20) vs CVD-Return Correlation",
+                        labels={'vwap_autocorr_20': 'VWAP Autocorr (lag=20)', 'cvd_corr': 'CVD-Return Corr [5-30m]'}
+                    )
+                    fig_ac20.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_ac20.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_ac20, use_container_width=True, key="pattern_vwap_autocorr_20")
+                    corr_ac20 = plot_ac20[['vwap_autocorr_20', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_ac20:.3f}")
+                else:
+                    st.info("No VWAP autocorr data available")
+            
+            col4c, col4d = st.columns(2)
+            
+            with col4c:
+                # VWAP Autocorr at lag=30 vs CVD Correlation
+                plot_ac30 = pattern_df[['vwap_autocorr_30', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_ac30.empty:
+                    fig_ac30 = px.scatter(
+                        plot_ac30,
+                        x='vwap_autocorr_30',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="VWAP Autocorr (lag=30) vs CVD-Return Correlation",
+                        labels={'vwap_autocorr_30': 'VWAP Autocorr (lag=30)', 'cvd_corr': 'CVD-Return Corr [5-30m]'}
+                    )
+                    fig_ac30.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_ac30.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_ac30, use_container_width=True, key="pattern_vwap_autocorr_30")
+                    corr_ac30 = plot_ac30[['vwap_autocorr_30', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_ac30:.3f}")
+                else:
+                    st.info("No VWAP autocorr data available")
+            
+            with col4d:
+                # VWAP Half-life vs CVD Correlation
+                plot_hl = pattern_df[['vwap_half_life', 'cvd_corr', 'ticker', 'corr_group']].dropna()
+                if not plot_hl.empty:
+                    fig_hl = px.scatter(
+                        plot_hl,
+                        x='vwap_half_life',
+                        y='cvd_corr',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        hover_data=['ticker'],
+                        title="VWAP Autocorr Half-Life vs CVD-Return Correlation",
+                        labels={'vwap_half_life': 'VWAP Half-Life (bars)', 'cvd_corr': 'CVD-Return Corr [5-30m]'}
+                    )
+                    fig_hl.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_hl.update_layout(height=400, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_hl, use_container_width=True, key="pattern_vwap_half_life")
+                    corr_hl = plot_hl[['vwap_half_life', 'cvd_corr']].corr().iloc[0, 1]
+                    st.caption(f"Correlation: {corr_hl:.3f}")
+                else:
+                    st.info("No half-life data available")
+            
+            # Distribution of autocorr metrics by group
+            st.markdown("#### VWAP Autocorr Metrics by Strategy Group")
+            col4e, col4f = st.columns(2)
+            
+            with col4e:
+                plot_ac_box = pattern_df[['vwap_autocorr_10', 'corr_group']].dropna()
+                if not plot_ac_box.empty:
+                    fig_ac_box = px.box(
+                        plot_ac_box,
+                        x='corr_group',
+                        y='vwap_autocorr_10',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        title="VWAP Autocorr (lag=10) by Group"
+                    )
+                    fig_ac_box.update_layout(height=350, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_ac_box, use_container_width=True, key="pattern_vwap_ac_box")
+            
+            with col4f:
+                plot_hl_box = pattern_df[['vwap_half_life', 'corr_group']].dropna()
+                if not plot_hl_box.empty:
+                    fig_hl_box = px.box(
+                        plot_hl_box,
+                        x='corr_group',
+                        y='vwap_half_life',
+                        color='corr_group',
+                        color_discrete_map=group_colors_p,
+                        category_orders={'corr_group': group_order_p},
+                        title="VWAP Half-Life by Group"
+                    )
+                    fig_hl_box.update_layout(height=350, template='plotly_white', showlegend=False)
+                    st.plotly_chart(fig_hl_box, use_container_width=True, key="pattern_vwap_hl_box")
+            
+            # ============ Summary Table ============
+            st.markdown("---")
+            st.markdown("### Summary: Feature Correlations with CVD-Return Correlation")
+            
+            features_to_summarize = [
+                ('cvd_velocity_5m', 'CVD Velocity'),
+                ('cvd_acceleration', 'CVD Acceleration'),
+                ('cvd_smoothness', 'CVD Smoothness'),
+                ('cvd_reversals', 'CVD Reversals'),
+                ('divergence_score', 'Price-CVD Divergence'),
+                ('vwap_autocorr_10', 'VWAP Autocorr (lag=10)'),
+                ('vwap_autocorr_20', 'VWAP Autocorr (lag=20)'),
+                ('vwap_autocorr_30', 'VWAP Autocorr (lag=30)'),
+                ('vwap_half_life', 'VWAP Half-Life'),
+                ('momentum_persistence', 'Momentum Persistence')
+            ]
+            
+            summary_corrs = []
+            for col, label in features_to_summarize:
+                if col in pattern_df.columns:
+                    valid = pattern_df[[col, 'cvd_corr']].dropna()
+                    if col == 'momentum_persistence':
+                        valid = valid[valid[col].abs() < 10]
+                    if len(valid) >= 20:
+                        corr = valid.corr().iloc[0, 1]
+                        summary_corrs.append({'Feature': label, 'Correlation': corr, 'N': len(valid)})
+            
+            if summary_corrs:
+                summary_corr_df = pd.DataFrame(summary_corrs).sort_values('Correlation', key=abs, ascending=False)
+                st.dataframe(
+                    summary_corr_df.style.format({'Correlation': '{:.4f}'}).background_gradient(
+                        subset=['Correlation'], cmap='RdBu_r', vmin=-0.3, vmax=0.3
+                    ),
+                    use_container_width=True
+                )
 
 
 if __name__ == "__main__":
