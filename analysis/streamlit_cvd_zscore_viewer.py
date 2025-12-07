@@ -271,8 +271,9 @@ def main():
     st.sidebar.caption(f"Events: {filtered_df.groupby(['ticker', 'acceptance_datetime_utc']).ngroups}")
 
     # ========== MAIN CONTENT ==========
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab8, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 CVD Z-Score Trajectories & Distributions",
+        "🔄 0-5m vs 5-30m Comparison",
         "📉 Ticker Correlations",
         "🔍 Event Deep Dive",
         "🎯 Correlation Group Analysis",
@@ -352,6 +353,89 @@ def main():
             stats = ticker_df.groupby('ticker')['cvd_zscore'].agg(['count', 'mean', 'std', 'min', 'max'])
             stats = stats.round(3)
             st.dataframe(stats, use_container_width=True)
+        
+        # Overall distribution histogram (all tickers, year filter only)
+        st.markdown("---")
+        st.markdown("### Overall CVD Z-Score Distribution (All Tickers)")
+        
+        n_bins = st.slider(
+            "Number of bins",
+            min_value=10, max_value=200, value=50, step=10,
+            key="tab1_nbins"
+        )
+        
+        # Filter: year only, all tickers
+        dist_df_0_5 = df[
+            (df['year'].isin(selected_years)) &
+            (df['seconds_since_event'] >= 0) &
+            (df['seconds_since_event'] <= 300)
+        ].copy()
+        
+        dist_df_5_30 = df[
+            (df['year'].isin(selected_years)) &
+            (df['seconds_since_event'] > 300) &
+            (df['seconds_since_event'] <= 1800)
+        ].copy()
+        
+        col_dist1, col_dist2 = st.columns(2)
+        
+        # 0-5m Distribution
+        with col_dist1:
+            if dist_df_0_5.empty:
+                st.warning("No data for 0-5m window.")
+            else:
+                n_tickers_0_5 = dist_df_0_5['ticker'].nunique()
+                n_events_0_5 = dist_df_0_5.groupby(['ticker', 'acceptance_datetime_utc']).ngroups
+                
+                fig_hist_0_5 = px.histogram(
+                    dist_df_0_5,
+                    x='cvd_zscore',
+                    nbins=n_bins,
+                    title=f"0-5m | {n_tickers_0_5} tickers, {n_events_0_5} events",
+                    labels={'cvd_zscore': 'CVD Z-Score', 'count': 'Count'}
+                )
+                fig_hist_0_5.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.7)
+                fig_hist_0_5.add_vline(
+                    x=dist_df_0_5['cvd_zscore'].mean(), 
+                    line_dash="dash", 
+                    line_color="red",
+                    annotation_text=f"μ={dist_df_0_5['cvd_zscore'].mean():.2f}"
+                )
+                fig_hist_0_5.update_layout(height=400, template='plotly_white')
+                fig_hist_0_5.update_traces(marker_color='#f97316')  # Orange
+                st.plotly_chart(fig_hist_0_5, use_container_width=True, key="tab1_hist_0_5")
+                
+                # Stats for 0-5m
+                st.caption(f"n={len(dist_df_0_5):,} | σ={dist_df_0_5['cvd_zscore'].std():.2f} | skew={dist_df_0_5['cvd_zscore'].skew():.2f}")
+        
+        # 5-30m Distribution
+        with col_dist2:
+            if dist_df_5_30.empty:
+                st.warning("No data for 5-30m window.")
+            else:
+                n_tickers_5_30 = dist_df_5_30['ticker'].nunique()
+                n_events_5_30 = dist_df_5_30.groupby(['ticker', 'acceptance_datetime_utc']).ngroups
+                
+                fig_hist_5_30 = px.histogram(
+                    dist_df_5_30,
+                    x='cvd_zscore',
+                    nbins=n_bins,
+                    title=f"5-30m | {n_tickers_5_30} tickers, {n_events_5_30} events",
+                    labels={'cvd_zscore': 'CVD Z-Score', 'count': 'Count'}
+                )
+                fig_hist_5_30.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.7)
+                fig_hist_5_30.add_vline(
+                    x=dist_df_5_30['cvd_zscore'].mean(), 
+                    line_dash="dash", 
+                    line_color="red",
+                    annotation_text=f"μ={dist_df_5_30['cvd_zscore'].mean():.2f}"
+                )
+                fig_hist_5_30.update_layout(height=400, template='plotly_white')
+                fig_hist_5_30.update_traces(marker_color='#3b82f6')  # Blue
+                st.plotly_chart(fig_hist_5_30, use_container_width=True, key="tab1_hist_5_30")
+                
+                # Stats for 5-30m
+                st.caption(f"n={len(dist_df_5_30):,} | σ={dist_df_5_30['cvd_zscore'].std():.2f} | skew={dist_df_5_30['cvd_zscore'].skew():.2f}")
 
     # ========== TAB 3: Single Event ==========
     with tab3:
@@ -2057,6 +2141,268 @@ def main():
                     ),
                     use_container_width=True
                 )
+
+    # ========== TAB 8: 0-5m vs 5-30m Comparison ==========
+    with tab8:
+        st.info("🔄 **Overview**: Compare CVD Z-Score behavior between early (0-5m) and later (5-30m) periods at the event level. Test directional persistence, trend strength, regime stability, and volatility decay.")
+        st.markdown("### 0-5m vs 5-30m CVD Z-Score Comparison")
+        
+        # Use data filtered by year only
+        df_compare = df[df['year'].isin(selected_years)].copy()
+        
+        if df_compare.empty:
+            st.warning("No data available for selected years.")
+        else:
+            # Calculate per-event stats for both windows
+            event_stats = []
+            min_obs = 5  # Minimum observations per window
+            
+            for (ticker, evt), grp in df_compare.groupby(['ticker', 'acceptance_datetime_utc']):
+                grp = grp.sort_values('seconds_since_event')
+                
+                # 0-5m window
+                win_0_5 = grp[(grp['seconds_since_event'] >= 0) & (grp['seconds_since_event'] <= 300)]['cvd_zscore'].dropna()
+                # 5-30m window
+                win_5_30 = grp[(grp['seconds_since_event'] > 300) & (grp['seconds_since_event'] <= 1800)]['cvd_zscore'].dropna()
+                
+                if len(win_0_5) < min_obs or len(win_5_30) < min_obs:
+                    continue
+                
+                # Calculate stats
+                event_stats.append({
+                    'ticker': ticker,
+                    'event': evt,
+                    # Means
+                    'mean_0_5': win_0_5.mean(),
+                    'mean_5_30': win_5_30.mean(),
+                    # Skewness
+                    'skew_0_5': win_0_5.skew(),
+                    'skew_5_30': win_5_30.skew(),
+                    # % Positive observations
+                    'pct_pos_0_5': (win_0_5 > 0).mean() * 100,
+                    'pct_pos_5_30': (win_5_30 > 0).mean() * 100,
+                    # Std Dev
+                    'std_0_5': win_0_5.std(),
+                    'std_5_30': win_5_30.std(),
+                    # Counts
+                    'n_0_5': len(win_0_5),
+                    'n_5_30': len(win_5_30)
+                })
+            
+            if not event_stats:
+                st.warning("No events with sufficient data in both windows.")
+            else:
+                stats_df = pd.DataFrame(event_stats)
+                
+                st.markdown(f"**Events analyzed:** {len(stats_df)} | **Tickers:** {stats_df['ticker'].nunique()}")
+                
+                # ========== Chart 1: Directional Persistence ==========
+                st.markdown("---")
+                st.markdown("### 1️⃣ Directional Persistence (Mean Check)")
+                st.markdown("*If 0-5m was mostly positive, is 5-30m also positive?*")
+                
+                col1a, col1b = st.columns([3, 1])
+                
+                with col1a:
+                    fig_mean = px.scatter(
+                        stats_df,
+                        x='mean_0_5',
+                        y='mean_5_30',
+                        color='ticker',
+                        color_discrete_sequence=TICKER_COLORS,
+                        hover_data=['ticker', 'event'],
+                        title="Mean CVD Z-Score: 0-5m vs 5-30m",
+                        labels={'mean_0_5': 'Mean (0-5m)', 'mean_5_30': 'Mean (5-30m)'}
+                    )
+                    # Add diagonal line (y=x)
+                    min_val = min(stats_df['mean_0_5'].min(), stats_df['mean_5_30'].min())
+                    max_val = max(stats_df['mean_0_5'].max(), stats_df['mean_5_30'].max())
+                    fig_mean.add_trace(go.Scatter(
+                        x=[min_val, max_val], y=[min_val, max_val],
+                        mode='lines', line=dict(color='gray', dash='dash', width=1),
+                        name='y=x', showlegend=False
+                    ))
+                    fig_mean.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_mean.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_mean.update_layout(
+                        height=450, template='plotly_white',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                    )
+                    st.plotly_chart(fig_mean, use_container_width=True, key="compare_mean")
+                
+                with col1b:
+                    corr_mean = stats_df[['mean_0_5', 'mean_5_30']].corr().iloc[0, 1]
+                    same_sign = ((stats_df['mean_0_5'] > 0) == (stats_df['mean_5_30'] > 0)).mean() * 100
+                    st.metric("Correlation", f"{corr_mean:.3f}")
+                    st.metric("Same Sign %", f"{same_sign:.1f}%")
+                    st.caption("High corr & same sign → directional persistence")
+                
+                # ========== Chart 2: Trend Strength (Skewness) ==========
+                st.markdown("---")
+                st.markdown("### 2️⃣ Trend Strength (Skewness Check)")
+                st.markdown("*If 0-5m had a fat tail (aggressive buying/selling), does it persist?*")
+                
+                col2a, col2b = st.columns([3, 1])
+                
+                with col2a:
+                    # Filter extreme skewness values
+                    skew_df = stats_df[(stats_df['skew_0_5'].abs() < 5) & (stats_df['skew_5_30'].abs() < 5)]
+                    
+                    fig_skew = px.scatter(
+                        skew_df,
+                        x='skew_0_5',
+                        y='skew_5_30',
+                        color='ticker',
+                        color_discrete_sequence=TICKER_COLORS,
+                        hover_data=['ticker', 'event'],
+                        title="Skewness: 0-5m vs 5-30m",
+                        labels={'skew_0_5': 'Skewness (0-5m)', 'skew_5_30': 'Skewness (5-30m)'}
+                    )
+                    # Add diagonal line
+                    min_s = min(skew_df['skew_0_5'].min(), skew_df['skew_5_30'].min())
+                    max_s = max(skew_df['skew_0_5'].max(), skew_df['skew_5_30'].max())
+                    fig_skew.add_trace(go.Scatter(
+                        x=[min_s, max_s], y=[min_s, max_s],
+                        mode='lines', line=dict(color='gray', dash='dash', width=1),
+                        name='y=x', showlegend=False
+                    ))
+                    fig_skew.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_skew.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_skew.update_layout(
+                        height=450, template='plotly_white',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                    )
+                    st.plotly_chart(fig_skew, use_container_width=True, key="compare_skew")
+                
+                with col2b:
+                    corr_skew = skew_df[['skew_0_5', 'skew_5_30']].corr().iloc[0, 1]
+                    same_sign_skew = ((skew_df['skew_0_5'] > 0) == (skew_df['skew_5_30'] > 0)).mean() * 100
+                    st.metric("Correlation", f"{corr_skew:.3f}")
+                    st.metric("Same Sign %", f"{same_sign_skew:.1f}%")
+                    st.caption("Positive corr → tail direction persists")
+                
+                # ========== Chart 3: Regime Stability (% Positive) ==========
+                st.markdown("---")
+                st.markdown("### 3️⃣ Regime Stability (Sign Ratio)")
+                st.markdown("*If 80% of ticks were positive in 0-5m, what % are positive in 5-30m?*")
+                
+                col3a, col3b = st.columns([3, 1])
+                
+                with col3a:
+                    fig_pct = px.scatter(
+                        stats_df,
+                        x='pct_pos_0_5',
+                        y='pct_pos_5_30',
+                        color='ticker',
+                        color_discrete_sequence=TICKER_COLORS,
+                        hover_data=['ticker', 'event'],
+                        title="% Positive Observations: 0-5m vs 5-30m",
+                        labels={'pct_pos_0_5': '% Positive (0-5m)', 'pct_pos_5_30': '% Positive (5-30m)'}
+                    )
+                    # Add diagonal line
+                    fig_pct.add_trace(go.Scatter(
+                        x=[0, 100], y=[0, 100],
+                        mode='lines', line=dict(color='gray', dash='dash', width=1),
+                        name='y=x', showlegend=False
+                    ))
+                    fig_pct.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_pct.add_vline(x=50, line_dash="dot", line_color="gray", opacity=0.5)
+                    fig_pct.update_layout(
+                        height=450, template='plotly_white',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                    )
+                    st.plotly_chart(fig_pct, use_container_width=True, key="compare_pct_pos")
+                
+                with col3b:
+                    corr_pct = stats_df[['pct_pos_0_5', 'pct_pos_5_30']].corr().iloc[0, 1]
+                    # % of events where both windows are >50% positive or both <50%
+                    same_regime = (((stats_df['pct_pos_0_5'] > 50) == (stats_df['pct_pos_5_30'] > 50))).mean() * 100
+                    st.metric("Correlation", f"{corr_pct:.3f}")
+                    st.metric("Same Regime %", f"{same_regime:.1f}%")
+                    st.caption("High values → regime persists")
+                
+                # ========== Chart 4: Volatility Decay (Std Dev) ==========
+                st.markdown("---")
+                st.markdown("### 4️⃣ Volatility Decay (Sigma Ratio)")
+                st.markdown("*Does high volatility in 0-5m predict high volatility in 5-30m, or mean-revert?*")
+                
+                col4a, col4b = st.columns([3, 1])
+                
+                with col4a:
+                    fig_std = px.scatter(
+                        stats_df,
+                        x='std_0_5',
+                        y='std_5_30',
+                        color='ticker',
+                        color_discrete_sequence=TICKER_COLORS,
+                        hover_data=['ticker', 'event'],
+                        title="Std Dev: 0-5m vs 5-30m",
+                        labels={'std_0_5': 'Std Dev (0-5m)', 'std_5_30': 'Std Dev (5-30m)'}
+                    )
+                    # Add diagonal line
+                    max_std = max(stats_df['std_0_5'].max(), stats_df['std_5_30'].max())
+                    fig_std.add_trace(go.Scatter(
+                        x=[0, max_std], y=[0, max_std],
+                        mode='lines', line=dict(color='gray', dash='dash', width=1),
+                        name='y=x', showlegend=False
+                    ))
+                    fig_std.update_layout(
+                        height=450, template='plotly_white',
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                    )
+                    st.plotly_chart(fig_std, use_container_width=True, key="compare_std")
+                
+                with col4b:
+                    corr_std = stats_df[['std_0_5', 'std_5_30']].corr().iloc[0, 1]
+                    # % where 5-30m volatility is lower
+                    vol_decay_pct = (stats_df['std_5_30'] < stats_df['std_0_5']).mean() * 100
+                    avg_ratio = (stats_df['std_5_30'] / stats_df['std_0_5']).mean()
+                    st.metric("Correlation", f"{corr_std:.3f}")
+                    st.metric("Vol Decay %", f"{vol_decay_pct:.1f}%")
+                    st.metric("Avg σ Ratio", f"{avg_ratio:.2f}")
+                    st.caption("Ratio < 1 → volatility decays")
+                
+                # ========== Summary Table ==========
+                st.markdown("---")
+                st.markdown("### Summary Statistics")
+                
+                summary_data = {
+                    'Metric': ['Mean', 'Skewness', '% Positive', 'Std Dev'],
+                    'Correlation': [
+                        stats_df[['mean_0_5', 'mean_5_30']].corr().iloc[0, 1],
+                        skew_df[['skew_0_5', 'skew_5_30']].corr().iloc[0, 1],
+                        stats_df[['pct_pos_0_5', 'pct_pos_5_30']].corr().iloc[0, 1],
+                        stats_df[['std_0_5', 'std_5_30']].corr().iloc[0, 1]
+                    ],
+                    'Interpretation': [
+                        'Directional persistence',
+                        'Tail direction persistence',
+                        'Regime stability',
+                        'Volatility clustering'
+                    ]
+                }
+                summary_table = pd.DataFrame(summary_data)
+                st.dataframe(
+                    summary_table.style.format({'Correlation': '{:.3f}'}).background_gradient(
+                        subset=['Correlation'], cmap='RdYlGn', vmin=-0.5, vmax=1.0
+                    ),
+                    use_container_width=True
+                )
+                
+                # Raw data expander
+                with st.expander("📋 View Event-Level Data"):
+                    display_cols = ['ticker', 'event', 'mean_0_5', 'mean_5_30', 'skew_0_5', 'skew_5_30',
+                                    'pct_pos_0_5', 'pct_pos_5_30', 'std_0_5', 'std_5_30']
+                    st.dataframe(
+                        stats_df[display_cols].style.format({
+                            'mean_0_5': '{:.3f}', 'mean_5_30': '{:.3f}',
+                            'skew_0_5': '{:.2f}', 'skew_5_30': '{:.2f}',
+                            'pct_pos_0_5': '{:.1f}%', 'pct_pos_5_30': '{:.1f}%',
+                            'std_0_5': '{:.3f}', 'std_5_30': '{:.3f}'
+                        }),
+                        use_container_width=True,
+                        height=400
+                    )
 
 
 if __name__ == "__main__":

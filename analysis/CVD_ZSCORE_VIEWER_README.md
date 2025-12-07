@@ -94,6 +94,13 @@ The app expects a CSV file with earnings event data. Configure the path in the s
 - Return autocorrelation (early vs later)
 - VW price autocorrelation metrics
 
+### 8. 🔄 0-5m vs 5-30m Comparison
+Event-level comparison of early vs later CVD z-score behavior:
+- **Directional Persistence**: Mean(0-5m) vs Mean(5-30m)
+- **Trend Strength**: Skewness(0-5m) vs Skewness(5-30m)
+- **Regime Stability**: % Positive obs(0-5m) vs % Positive obs(5-30m)
+- **Volatility Decay**: StdDev(0-5m) vs StdDev(5-30m)
+
 ## Sidebar Controls
 
 - **📂 Data Source**: Configure CSV file path
