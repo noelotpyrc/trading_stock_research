@@ -2201,6 +2201,15 @@ def main():
                 st.markdown("### 1️⃣ Directional Persistence (Mean Check)")
                 st.markdown("*If 0-5m was mostly positive, is 5-30m also positive?*")
                 
+                # Fit linear regression: Mean_5_30 = α + β * Mean_0_5
+                reg_data = stats_df[['mean_0_5', 'mean_5_30']].dropna()
+                beta, alpha = np.polyfit(reg_data['mean_0_5'], reg_data['mean_5_30'], 1)
+                # Calculate R²
+                y_pred = alpha + beta * reg_data['mean_0_5']
+                ss_res = ((reg_data['mean_5_30'] - y_pred) ** 2).sum()
+                ss_tot = ((reg_data['mean_5_30'] - reg_data['mean_5_30'].mean()) ** 2).sum()
+                r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+                
                 col1a, col1b = st.columns([3, 1])
                 
                 with col1a:
@@ -2222,6 +2231,14 @@ def main():
                         mode='lines', line=dict(color='gray', dash='dash', width=1),
                         name='y=x', showlegend=False
                     ))
+                    # Add regression line
+                    x_range = np.array([stats_df['mean_0_5'].min(), stats_df['mean_0_5'].max()])
+                    y_reg = alpha + beta * x_range
+                    fig_mean.add_trace(go.Scatter(
+                        x=x_range, y=y_reg,
+                        mode='lines', line=dict(color='red', width=2),
+                        name=f'Fit: α={alpha:.3f}, β={beta:.3f}', showlegend=True
+                    ))
                     fig_mean.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
                     fig_mean.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
                     fig_mean.update_layout(
@@ -2235,7 +2252,12 @@ def main():
                     same_sign = ((stats_df['mean_0_5'] > 0) == (stats_df['mean_5_30'] > 0)).mean() * 100
                     st.metric("Correlation", f"{corr_mean:.3f}")
                     st.metric("Same Sign %", f"{same_sign:.1f}%")
-                    st.caption("High corr & same sign → directional persistence")
+                    st.markdown("**Linear Regression**")
+                    st.latex(r"\text{Mean}_{5\text{-}30} = \alpha + \beta \cdot \text{Mean}_{0\text{-}5}")
+                    st.metric("α (intercept)", f"{alpha:.4f}")
+                    st.metric("β (slope)", f"{beta:.4f}")
+                    st.metric("R²", f"{r_squared:.4f}")
+                    st.caption("β < 1 → mean reversion; β > 1 → momentum")
                 
                 # ========== Chart 2: Trend Strength (Skewness) ==========
                 st.markdown("---")
