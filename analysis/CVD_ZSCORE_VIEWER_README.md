@@ -67,6 +67,7 @@ The app expects a CSV file with earnings event data. Configure the path in the s
 - Single event analysis with dual-axis charts
 - CVD z-score vs price return since event
 - CVD z-score vs forward 10-min return
+- VW price action vs CVD z-score (time series comparison)
 
 ### 4. 🎯 Correlation Group Analysis
 - Group events into strategy regimes:

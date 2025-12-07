@@ -478,6 +478,47 @@ def main():
                     
                     st.plotly_chart(fig2, use_container_width=True, key="tab2_chart2")
                     
+                    # Chart 3: VW Price vs CVD Z-Score
+                    st.markdown("#### Price Action (VW) vs CVD Z-Score")
+                    if 'vw' in event_df.columns and event_df['vw'].notna().any():
+                        fig3 = make_subplots(specs=[[{"secondary_y": True}]])
+                        
+                        fig3.add_trace(
+                            go.Scatter(
+                                x=event_df['seconds_since_event'],
+                                y=event_df['vw'],
+                                mode='lines',
+                                name='VW Price',
+                                line=dict(color='#8b5cf6', width=2)
+                            ),
+                            secondary_y=False
+                        )
+                        
+                        fig3.add_trace(
+                            go.Scatter(
+                                x=event_df['seconds_since_event'],
+                                y=event_df['cvd_zscore'],
+                                mode='lines',
+                                name='CVD Z-Score',
+                                line=dict(color='#3b82f6', width=2)
+                            ),
+                            secondary_y=True
+                        )
+                        
+                        fig3.update_layout(
+                            title=f"{selected_ticker_t2} - VW Price vs CVD Z-Score",
+                            height=400,
+                            template='plotly_white',
+                            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                        )
+                        fig3.update_xaxes(title_text="Seconds Since Event")
+                        fig3.update_yaxes(title_text="VW Price ($)", secondary_y=False)
+                        fig3.update_yaxes(title_text="CVD Z-Score", secondary_y=True)
+                        
+                        st.plotly_chart(fig3, use_container_width=True, key="tab2_chart3")
+                    else:
+                        st.info("VW (volume-weighted price) column not available in data.")
+                    
                     # Summary stats
                     st.markdown("#### Event Summary")
                     col_s1, col_s2, col_s3 = st.columns(3)
