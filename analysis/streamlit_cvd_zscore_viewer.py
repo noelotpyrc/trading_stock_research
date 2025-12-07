@@ -16,8 +16,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# Data path
-DATA_PATH = "/Volumes/Extreme SSD/trading_data/stock/data/processed/earnings_0_to_120m_consolidated.csv"
+# Default data path
+DEFAULT_DATA_PATH = "/Volumes/Extreme SSD/trading_data/stock/data/processed/earnings_0_to_120m_consolidated.csv"
 
 # Consistent color palette for tickers
 TICKER_COLORS = px.colors.qualitative.Set2 + px.colors.qualitative.Pastel1
@@ -168,10 +168,10 @@ def calculate_vol_front_loading(event_slice_5m):
 
 
 @st.cache_data
-def load_data():
+def load_data(data_path: str):
     """Load the consolidated earnings data."""
     try:
-        df = pd.read_csv(DATA_PATH)
+        df = pd.read_csv(data_path)
         df['acceptance_datetime_utc'] = pd.to_datetime(df['acceptance_datetime_utc'])
         if 'year' not in df.columns:
             df['year'] = df['acceptance_datetime_utc'].dt.year
@@ -185,13 +185,41 @@ def main():
     st.title("📈 CVD Z-Score Viewer")
     st.markdown("Explore CVD z-score behavior across earnings events")
     
+    # ========== SIDEBAR: Data Source ==========
+    st.sidebar.header("📂 Data Source")
+    data_path = st.sidebar.text_input(
+        "Data File Path",
+        value=DEFAULT_DATA_PATH,
+        help="Path to the consolidated earnings CSV file",
+        key="data_path"
+    )
+    
+    # Show required columns info
+    with st.sidebar.expander("ℹ️ Required Columns"):
+        st.markdown("""
+        **Critical columns:**
+        - `acceptance_datetime_utc`
+        - `ticker`, `year`
+        - `seconds_since_event`
+        - `close`, `cvd_zscore`
+        - `cvd_since_event`
+        - `target_ret_600s`
+        
+        **Optional columns:**
+        - `event_price`, `vwap_since_event`
+        - `vw`, `first_5m_range_pct`
+        - `Surprise(%)`, `volume`
+        - `target_ret_120s`, `target_ret_240s`
+        """)
+    
     # Load data
-    df = load_data()
+    df = load_data(data_path)
     if df.empty:
         st.error("No data available. Please check the data path.")
         return
 
-    # ========== SIDEBAR ==========
+    # ========== SIDEBAR: Filters ==========
+    st.sidebar.markdown("---")
     st.sidebar.header("🔧 Filters")
     
     # Year filter
@@ -244,17 +272,18 @@ def main():
 
     # ========== MAIN CONTENT ==========
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "📊 All Events (by Ticker)",
-        "🔍 Single Event",
-        "📈 Event Correlation Explorer",
-        "🎯 Strategy Group Analysis",
+        "📊 CVD Z-Score Trajectories & Distributions",
         "📉 Ticker Correlations",
-        "📐 VWAP Deviation Analysis",
-        "🔬 Pattern Analysis"
+        "🔍 Event Deep Dive",
+        "🎯 Correlation Group Analysis",
+        "📈 Event Correlation Deep Dive",
+        "📐 VWAP Deviation Explorer",
+        "🔬 First 5m Signals Explorer"
     ])
     
     # ========== TAB 1: Events by Ticker ==========
     with tab1:
+        st.info("📊 **Overview**: Visualize CVD Z-Score trajectories over time for multiple events, and compare distributions across tickers.")
         st.markdown("### CVD Z-Score vs Time Since Event")
         st.markdown("Each line represents one earnings event for the selected ticker(s)")
         
@@ -324,8 +353,9 @@ def main():
             stats = stats.round(3)
             st.dataframe(stats, use_container_width=True)
 
-    # ========== TAB 2: Single Event ==========
-    with tab2:
+    # ========== TAB 3: Single Event ==========
+    with tab3:
+        st.info("🔍 **Overview**: Deep dive into a single earnings event. Compare CVD Z-Score with price return and forward 10min return over time.")
         st.markdown("### Single Event Analysis")
         
         # Event selector
@@ -469,10 +499,10 @@ def main():
                         display_cols = [c for c in display_cols if c in event_df.columns]
                         st.dataframe(event_df[display_cols], use_container_width=True, height=400)
 
-    # ========== TAB 3: Event Correlation Explorer ==========
-    with tab3:
+    # ========== TAB 5: Event Correlation Explorer ==========
+    with tab5:
+        st.info("📈 **Overview**: Explore event-level factors (surprise %, quarter, early features) that might predict CVD-return correlation strength. Compare 10min vs short-term correlations.")
         st.markdown("### Event-Level Correlations")
-        st.markdown("Explore what predicts CVD z-score correlation with forward returns.")
         
         # Only use 2024/2025 data for this analysis
         df_events = df.copy()
@@ -513,7 +543,7 @@ def main():
         selected_x = st.selectbox(
             "X-axis feature",
             options=x_axis_options,
-            index=0,
+            index=3,  # Default to "Quarter (event time)"
             key="corr_x_axis"
         )
         
@@ -822,8 +852,8 @@ def main():
 
     # ========== TAB 4: Strategy Group Analysis ==========
     with tab4:
-        st.markdown("### Strategy Group Analysis")
-        st.markdown("Group events by correlation strength to identify what predicts each strategy regime.")
+        st.info("🎯 **Overview**: Group events into strategy regimes (Strong Mean Reversion, Moderate Mean Reversion, No Signal, Momentum) based on CVD-return correlation. Analyze feature distributions across groups.")
+        st.markdown("### Correlation Group Analysis")
         
         # Define correlation windows
         corr_windows_t4 = {
@@ -1029,10 +1059,10 @@ def main():
                 
                 st.plotly_chart(fig_strip, use_container_width=True, key=f"strategy_strip_{feat_col}")
 
-    # ========== TAB 5: Ticker Correlations ==========
-    with tab5:
+    # ========== TAB 2: Ticker Correlations ==========
+    with tab2:
+        st.info("📉 **Overview**: Compare CVD-return correlation strength across different tickers. Identify which stocks show stronger mean reversion or momentum signals.")
         st.markdown("### Ticker-Level CVD Z-Score Correlations")
-        st.markdown("Correlation between CVD Z-Score and 10min forward return by ticker (using sidebar filters)")
         
         # Use filtered_df from sidebar
         if filtered_df.empty:
@@ -1141,8 +1171,8 @@ def main():
 
     # ========== TAB 6: VWAP Deviation Analysis ==========
     with tab6:
+        st.info("📐 **Overview**: Track VWAP deviation (|price - vwap| / price) from 1m to 15m. See how VWAP deviation patterns differ across strategy groups.")
         st.markdown("### VWAP Deviation Analysis")
-        st.markdown("Explore how VWAP deviation evolves over time and its relationship with CVD-return correlations")
         
         # Use 2024/2025 data
         df_vwap = df.copy()
@@ -1387,8 +1417,8 @@ def main():
 
     # ========== TAB 7: Pattern Analysis ==========
     with tab7:
-        st.markdown("### 🔬 Pattern Analysis")
-        st.markdown("Explore CVD velocity, price-CVD divergence, and return autocorrelation patterns")
+        st.info("🔬 **Overview**: Analyze first 5 minutes patterns: CVD velocity/acceleration, price-CVD divergence, return momentum, and VW price autocorrelation. Find early signals that predict later CVD-return behavior.")
+        st.markdown("### First 5m Signals Analysis")
         
         # Use 2024/2025 data
         df_pattern = df.copy()
