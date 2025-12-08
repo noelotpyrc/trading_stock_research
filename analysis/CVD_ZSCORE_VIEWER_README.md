@@ -68,6 +68,10 @@ The app expects a CSV file with earnings event data. Configure the path in the s
 - CVD z-score vs price return since event
 - CVD z-score vs forward 10-min return
 - VW price action vs CVD z-score (time series comparison)
+- **5-30m Distribution Estimator**: Predict 5-30m percentiles from 0-5m data using:
+  - Formula: P_late = μ_pred + (P_early - μ_early) × k
+  - Global α, β (regression), k (vol decay) parameters
+  - Comparison with actual 5-30m values
 
 ### 4. 🎯 Correlation Group Analysis
 - Group events into strategy regimes:

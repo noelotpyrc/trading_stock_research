@@ -5,6 +5,8 @@ Visualize CVD z-score behavior across earnings events.
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
+import json
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -271,7 +273,7 @@ def main():
     st.sidebar.caption(f"Events: {filtered_df.groupby(['ticker', 'acceptance_datetime_utc']).ngroups}")
 
     # ========== MAIN CONTENT ==========
-    tab1, tab8, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab8, tab2, tab3, tab4, tab5, tab6, tab7, tab9 = st.tabs([
         "📊 CVD Z-Score Trajectories & Distributions",
         "🔄 0-5m vs 5-30m Comparison",
         "📉 Ticker Correlations",
@@ -279,7 +281,8 @@ def main():
         "🎯 Correlation Group Analysis",
         "📈 Event Correlation Deep Dive",
         "📐 VWAP Deviation Explorer",
-        "🔬 First 5m Signals Explorer"
+        "🔬 First 5m Signals Explorer",
+        "🎲 Logistic Regression"
     ])
     
     # ========== TAB 1: Events by Ticker ==========
@@ -616,6 +619,163 @@ def main():
                         fwd_range = event_df['fwd_10m_return_pct'].dropna()
                         if not fwd_range.empty:
                             st.metric("Fwd 10min Return Range", f"{fwd_range.min():.2f}% to {fwd_range.max():.2f}%")
+                    
+                    # ========== 5-30m Distribution Estimator ==========
+                    st.markdown("---")
+                    st.markdown("#### 📐 5-30m CVD Z-Score Distribution Estimator")
+                    st.markdown("*Estimate the 5-30m distribution based on 0-5m observations using percentile-specific regression.*")
+                    
+                    # Get full event data (not filtered by sidebar time range)
+                    full_event_df = df[
+                        (df['ticker'] == selected_ticker_t2) &
+                        (df['acceptance_datetime_utc'] == selected_event)
+                    ].sort_values('seconds_since_event')
+                    
+                    # Get 0-5m and 5-30m data for this event
+                    event_0_5 = full_event_df[(full_event_df['seconds_since_event'] >= 0) & 
+                                               (full_event_df['seconds_since_event'] <= 300)]['cvd_zscore'].dropna()
+                    event_5_30 = full_event_df[(full_event_df['seconds_since_event'] > 300) & 
+                                                (full_event_df['seconds_since_event'] <= 1800)]['cvd_zscore'].dropna()
+                    
+                    if len(event_0_5) < 5:
+                        st.warning("Insufficient 0-5m data for this event.")
+                    else:
+                        # Calculate global regression parameters from all events in selected years
+                        df_global = df[df['year'].isin(selected_years)].copy()
+                        global_stats = []
+                        min_obs_global = 5
+                        
+                        for (t, e), grp in df_global.groupby(['ticker', 'acceptance_datetime_utc']):
+                            grp = grp.sort_values('seconds_since_event')
+                            w0_5 = grp[(grp['seconds_since_event'] >= 0) & (grp['seconds_since_event'] <= 300)]['cvd_zscore'].dropna()
+                            w5_30 = grp[(grp['seconds_since_event'] > 300) & (grp['seconds_since_event'] <= 1800)]['cvd_zscore'].dropna()
+                            if len(w0_5) >= min_obs_global and len(w5_30) >= min_obs_global:
+                                global_stats.append({
+                                    'mean_0_5': w0_5.mean(),
+                                    'mean_5_30': w5_30.mean(),
+                                    'p5_0_5': np.percentile(w0_5, 5),
+                                    'p5_5_30': np.percentile(w5_30, 5),
+                                    'p10_0_5': np.percentile(w0_5, 10),
+                                    'p10_5_30': np.percentile(w5_30, 10),
+                                    'p90_0_5': np.percentile(w0_5, 90),
+                                    'p90_5_30': np.percentile(w5_30, 90),
+                                    'p95_0_5': np.percentile(w0_5, 95),
+                                    'p95_5_30': np.percentile(w5_30, 95),
+                                })
+                        
+                        if len(global_stats) < 10:
+                            st.warning("Insufficient events to calculate global parameters.")
+                        else:
+                            global_df = pd.DataFrame(global_stats)
+                            
+                            # Calculate regression for each metric
+                            metrics = [
+                                ('Mean', 'mean_0_5', 'mean_5_30'),
+                                ('P5', 'p5_0_5', 'p5_5_30'),
+                                ('P10', 'p10_0_5', 'p10_5_30'),
+                                ('P90', 'p90_0_5', 'p90_5_30'),
+                                ('P95', 'p95_0_5', 'p95_5_30'),
+                            ]
+                            
+                            reg_params = {}
+                            for name, col_0_5, col_5_30 in metrics:
+                                beta_m, alpha_m = np.polyfit(global_df[col_0_5], global_df[col_5_30], 1)
+                                reg_params[name] = {'alpha': alpha_m, 'beta': beta_m}
+                            
+                            # Display regression parameters table
+                            st.markdown("**Regression Parameters** (from all events in selected years)")
+                            st.latex(r"Y_{5\text{-}30} = \alpha + \beta \times X_{0\text{-}5}")
+                            
+                            param_data = []
+                            for name in ['Mean', 'P5', 'P10', 'P90', 'P95']:
+                                param_data.append({
+                                    'Metric': name,
+                                    'α': reg_params[name]['alpha'],
+                                    'β': reg_params[name]['beta']
+                                })
+                            param_df = pd.DataFrame(param_data)
+                            st.dataframe(
+                                param_df.style.format({'α': '{:.4f}', 'β': '{:.4f}'}).background_gradient(
+                                    subset=['β'], cmap='RdYlGn', vmin=0, vmax=1.5
+                                ),
+                                use_container_width=True
+                            )
+                            
+                            # Calculate this event's 0-5m values
+                            event_values_0_5 = {
+                                'Mean': event_0_5.mean(),
+                                'P5': np.percentile(event_0_5, 5),
+                                'P10': np.percentile(event_0_5, 10),
+                                'P90': np.percentile(event_0_5, 90),
+                                'P95': np.percentile(event_0_5, 95),
+                            }
+                            
+                            # Calculate estimated 5-30m values
+                            est_values_5_30 = {}
+                            for name in ['Mean', 'P5', 'P10', 'P90', 'P95']:
+                                alpha_m = reg_params[name]['alpha']
+                                beta_m = reg_params[name]['beta']
+                                est_values_5_30[name] = alpha_m + beta_m * event_values_0_5[name]
+                            
+                            # Display this event's values
+                            st.markdown("**This Event's Statistics**")
+                            
+                            # Create comparison table
+                            comparison_data = []
+                            has_actual = len(event_5_30) >= 5
+                            
+                            if has_actual:
+                                actual_values_5_30 = {
+                                    'Mean': event_5_30.mean(),
+                                    'P5': np.percentile(event_5_30, 5),
+                                    'P10': np.percentile(event_5_30, 10),
+                                    'P90': np.percentile(event_5_30, 90),
+                                    'P95': np.percentile(event_5_30, 95),
+                                }
+                            
+                            for name in ['Mean', 'P5', 'P10', 'P90', 'P95']:
+                                row = {
+                                    'Metric': name,
+                                    '0-5m (Actual)': event_values_0_5[name],
+                                    '5-30m (Estimated)': est_values_5_30[name],
+                                }
+                                if has_actual:
+                                    row['5-30m (Actual)'] = actual_values_5_30[name]
+                                    row['Error'] = actual_values_5_30[name] - est_values_5_30[name]
+                                comparison_data.append(row)
+                            
+                            comparison_df = pd.DataFrame(comparison_data)
+                            
+                            if has_actual:
+                                st.dataframe(
+                                    comparison_df.style.format({
+                                        '0-5m (Actual)': '{:.4f}',
+                                        '5-30m (Estimated)': '{:.4f}',
+                                        '5-30m (Actual)': '{:.4f}',
+                                        'Error': '{:+.4f}'
+                                    }).background_gradient(
+                                        subset=['Error'], cmap='RdYlGn_r', vmin=-0.5, vmax=0.5
+                                    ),
+                                    use_container_width=True
+                                )
+                            else:
+                                st.dataframe(
+                                    comparison_df.style.format({
+                                        '0-5m (Actual)': '{:.4f}',
+                                        '5-30m (Estimated)': '{:.4f}',
+                                    }),
+                                    use_container_width=True
+                                )
+                                st.info("Insufficient 5-30m data to compare with actual values.")
+                            
+                            # Visual summary
+                            st.markdown("**Estimated 5-30m Range**")
+                            col_v1, col_v2, col_v3 = st.columns(3)
+                            col_v1.metric("Est. P5 → P95 Range", 
+                                         f"{est_values_5_30['P5']:.2f} to {est_values_5_30['P95']:.2f}")
+                            col_v2.metric("Est. P10 → P90 Range", 
+                                         f"{est_values_5_30['P10']:.2f} to {est_values_5_30['P90']:.2f}")
+                            col_v3.metric("Est. Mean", f"{est_values_5_30['Mean']:.4f}")
                     
                     # Raw data
                     with st.expander("📋 View Raw Data"):
@@ -2175,6 +2335,15 @@ def main():
                     # Means
                     'mean_0_5': win_0_5.mean(),
                     'mean_5_30': win_5_30.mean(),
+                    # Percentiles
+                    'p5_0_5': np.percentile(win_0_5, 5),
+                    'p5_5_30': np.percentile(win_5_30, 5),
+                    'p10_0_5': np.percentile(win_0_5, 10),
+                    'p10_5_30': np.percentile(win_5_30, 10),
+                    'p90_0_5': np.percentile(win_0_5, 90),
+                    'p90_5_30': np.percentile(win_5_30, 90),
+                    'p95_0_5': np.percentile(win_0_5, 95),
+                    'p95_5_30': np.percentile(win_5_30, 95),
                     # Skewness
                     'skew_0_5': win_0_5.skew(),
                     'skew_5_30': win_5_30.skew(),
@@ -2198,66 +2367,113 @@ def main():
                 
                 # ========== Chart 1: Directional Persistence ==========
                 st.markdown("---")
-                st.markdown("### 1️⃣ Directional Persistence (Mean Check)")
-                st.markdown("*If 0-5m was mostly positive, is 5-30m also positive?*")
+                st.markdown("### 1️⃣ Directional Persistence (Mean & Percentiles)")
+                st.markdown("*Compare 0-5m vs 5-30m for Mean and key percentiles (5th, 10th, 90th, 95th)*")
                 
-                # Fit linear regression: Mean_5_30 = α + β * Mean_0_5
-                reg_data = stats_df[['mean_0_5', 'mean_5_30']].dropna()
-                beta, alpha = np.polyfit(reg_data['mean_0_5'], reg_data['mean_5_30'], 1)
-                # Calculate R²
-                y_pred = alpha + beta * reg_data['mean_0_5']
-                ss_res = ((reg_data['mean_5_30'] - y_pred) ** 2).sum()
-                ss_tot = ((reg_data['mean_5_30'] - reg_data['mean_5_30'].mean()) ** 2).sum()
-                r_squared = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+                # Define metrics to analyze
+                persistence_metrics = [
+                    ('mean', 'mean_0_5', 'mean_5_30', 'Mean'),
+                    ('p5', 'p5_0_5', 'p5_5_30', '5th Percentile'),
+                    ('p10', 'p10_0_5', 'p10_5_30', '10th Percentile'),
+                    ('p90', 'p90_0_5', 'p90_5_30', '90th Percentile'),
+                    ('p95', 'p95_0_5', 'p95_5_30', '95th Percentile'),
+                ]
                 
-                col1a, col1b = st.columns([3, 1])
+                # Calculate regression for all metrics
+                regression_results = []
+                for metric_key, col_0_5, col_5_30, label in persistence_metrics:
+                    reg_data = stats_df[[col_0_5, col_5_30]].dropna()
+                    if len(reg_data) >= 10:
+                        beta_m, alpha_m = np.polyfit(reg_data[col_0_5], reg_data[col_5_30], 1)
+                        y_pred_m = alpha_m + beta_m * reg_data[col_0_5]
+                        ss_res_m = ((reg_data[col_5_30] - y_pred_m) ** 2).sum()
+                        ss_tot_m = ((reg_data[col_5_30] - reg_data[col_5_30].mean()) ** 2).sum()
+                        r2_m = 1 - (ss_res_m / ss_tot_m) if ss_tot_m != 0 else 0
+                        corr_m = reg_data.corr().iloc[0, 1]
+                    else:
+                        alpha_m, beta_m, r2_m, corr_m = np.nan, np.nan, np.nan, np.nan
+                    regression_results.append({
+                        'metric': label,
+                        'col_0_5': col_0_5,
+                        'col_5_30': col_5_30,
+                        'alpha': alpha_m,
+                        'beta': beta_m,
+                        'r2': r2_m,
+                        'corr': corr_m
+                    })
                 
-                with col1a:
-                    fig_mean = px.scatter(
-                        stats_df,
-                        x='mean_0_5',
-                        y='mean_5_30',
-                        color='ticker',
-                        color_discrete_sequence=TICKER_COLORS,
-                        hover_data=['ticker', 'event'],
-                        title="Mean CVD Z-Score: 0-5m vs 5-30m",
-                        labels={'mean_0_5': 'Mean (0-5m)', 'mean_5_30': 'Mean (5-30m)'}
-                    )
-                    # Add diagonal line (y=x)
-                    min_val = min(stats_df['mean_0_5'].min(), stats_df['mean_5_30'].min())
-                    max_val = max(stats_df['mean_0_5'].max(), stats_df['mean_5_30'].max())
-                    fig_mean.add_trace(go.Scatter(
-                        x=[min_val, max_val], y=[min_val, max_val],
-                        mode='lines', line=dict(color='gray', dash='dash', width=1),
-                        name='y=x', showlegend=False
-                    ))
-                    # Add regression line
-                    x_range = np.array([stats_df['mean_0_5'].min(), stats_df['mean_0_5'].max()])
-                    y_reg = alpha + beta * x_range
-                    fig_mean.add_trace(go.Scatter(
-                        x=x_range, y=y_reg,
-                        mode='lines', line=dict(color='red', width=2),
-                        name=f'Fit: α={alpha:.3f}, β={beta:.3f}', showlegend=True
-                    ))
-                    fig_mean.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
-                    fig_mean.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
-                    fig_mean.update_layout(
-                        height=450, template='plotly_white',
-                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
-                    )
-                    st.plotly_chart(fig_mean, use_container_width=True, key="compare_mean")
+                # Regression Summary Table
+                reg_summary = pd.DataFrame(regression_results)
+                st.markdown("**Regression Summary: Y(5-30m) = α + β × X(0-5m)**")
+                st.dataframe(
+                    reg_summary[['metric', 'alpha', 'beta', 'r2', 'corr']].style.format({
+                        'alpha': '{:.4f}', 'beta': '{:.4f}', 'r2': '{:.4f}', 'corr': '{:.4f}'
+                    }).background_gradient(subset=['beta'], cmap='RdYlGn', vmin=0, vmax=1.5),
+                    use_container_width=True
+                )
+                st.caption("β < 1 → mean reversion; β ≈ 1 → persistence; β > 1 → momentum amplification")
                 
-                with col1b:
-                    corr_mean = stats_df[['mean_0_5', 'mean_5_30']].corr().iloc[0, 1]
-                    same_sign = ((stats_df['mean_0_5'] > 0) == (stats_df['mean_5_30'] > 0)).mean() * 100
-                    st.metric("Correlation", f"{corr_mean:.3f}")
-                    st.metric("Same Sign %", f"{same_sign:.1f}%")
-                    st.markdown("**Linear Regression**")
-                    st.latex(r"\text{Mean}_{5\text{-}30} = \alpha + \beta \cdot \text{Mean}_{0\text{-}5}")
-                    st.metric("α (intercept)", f"{alpha:.4f}")
-                    st.metric("β (slope)", f"{beta:.4f}")
-                    st.metric("R²", f"{r_squared:.4f}")
-                    st.caption("β < 1 → mean reversion; β > 1 → momentum")
+                # Create tabs for each metric
+                metric_tabs = st.tabs([r['metric'] for r in regression_results])
+                
+                for i, (tab, reg_info) in enumerate(zip(metric_tabs, regression_results)):
+                    with tab:
+                        col_0_5 = reg_info['col_0_5']
+                        col_5_30 = reg_info['col_5_30']
+                        alpha_m = reg_info['alpha']
+                        beta_m = reg_info['beta']
+                        r2_m = reg_info['r2']
+                        corr_m = reg_info['corr']
+                        
+                        col_chart, col_stats = st.columns([3, 1])
+                        
+                        with col_chart:
+                            fig_m = px.scatter(
+                                stats_df,
+                                x=col_0_5,
+                                y=col_5_30,
+                                color='ticker',
+                                color_discrete_sequence=TICKER_COLORS,
+                                hover_data=['ticker', 'event'],
+                                title=f"{reg_info['metric']}: 0-5m vs 5-30m",
+                                labels={col_0_5: f"{reg_info['metric']} (0-5m)", col_5_30: f"{reg_info['metric']} (5-30m)"}
+                            )
+                            # Add diagonal line (y=x)
+                            min_val = min(stats_df[col_0_5].min(), stats_df[col_5_30].min())
+                            max_val = max(stats_df[col_0_5].max(), stats_df[col_5_30].max())
+                            fig_m.add_trace(go.Scatter(
+                                x=[min_val, max_val], y=[min_val, max_val],
+                                mode='lines', line=dict(color='gray', dash='dash', width=1),
+                                name='y=x', showlegend=False
+                            ))
+                            # Add regression line if valid
+                            if not np.isnan(alpha_m):
+                                x_range = np.array([stats_df[col_0_5].min(), stats_df[col_0_5].max()])
+                                y_reg = alpha_m + beta_m * x_range
+                                fig_m.add_trace(go.Scatter(
+                                    x=x_range, y=y_reg,
+                                    mode='lines', line=dict(color='red', width=2),
+                                    name=f'Fit: β={beta_m:.3f}', showlegend=True
+                                ))
+                            fig_m.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+                            fig_m.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.5)
+                            fig_m.update_layout(
+                                height=400, template='plotly_white',
+                                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
+                            )
+                            st.plotly_chart(fig_m, use_container_width=True, key=f"compare_{col_0_5}")
+                        
+                        with col_stats:
+                            if not np.isnan(corr_m):
+                                st.metric("Correlation", f"{corr_m:.3f}")
+                                same_sign = ((stats_df[col_0_5] > 0) == (stats_df[col_5_30] > 0)).mean() * 100
+                                st.metric("Same Sign %", f"{same_sign:.1f}%")
+                                st.markdown("**Regression**")
+                                st.metric("α", f"{alpha_m:.4f}")
+                                st.metric("β", f"{beta_m:.4f}")
+                                st.metric("R²", f"{r2_m:.4f}")
+                            else:
+                                st.warning("Insufficient data")
                 
                 # ========== Chart 2: Trend Strength (Skewness) ==========
                 st.markdown("---")
@@ -2378,11 +2594,15 @@ def main():
                     corr_std = stats_df[['std_0_5', 'std_5_30']].corr().iloc[0, 1]
                     # % where 5-30m volatility is lower
                     vol_decay_pct = (stats_df['std_5_30'] < stats_df['std_0_5']).mean() * 100
-                    avg_ratio = (stats_df['std_5_30'] / stats_df['std_0_5']).mean()
+                    # Calculate k = Median(σ_5-30 / σ_0-5)
+                    sigma_ratio = stats_df['std_5_30'] / stats_df['std_0_5']
+                    k_median = sigma_ratio.median()
                     st.metric("Correlation", f"{corr_std:.3f}")
                     st.metric("Vol Decay %", f"{vol_decay_pct:.1f}%")
-                    st.metric("Avg σ Ratio", f"{avg_ratio:.2f}")
-                    st.caption("Ratio < 1 → volatility decays")
+                    st.markdown("**Median Sigma Ratio**")
+                    st.latex(r"k = \text{Median}\left( \frac{\sigma_{5\text{-}30}}{\sigma_{0\text{-}5}} \right)")
+                    st.metric("k", f"{k_median:.4f}")
+                    st.caption("k < 1 → volatility decays; k > 1 → volatility persists")
                 
                 # ========== Summary Table ==========
                 st.markdown("---")
@@ -2425,6 +2645,356 @@ def main():
                         use_container_width=True,
                         height=400
                     )
+
+
+    # ========== TAB 9: Logistic Regression ==========
+    with tab9:
+        st.info("🎲 **Overview**: Logistic regression model predicting positive 10-minute forward returns using CVD Z-Score and VWAP Distance % as predictors. Data from 5m to 30m after event.")
+        st.markdown("### Logistic Regression: Predicting Return Direction")
+        
+        # Artifacts directory
+        artifacts_dir = os.path.join(os.path.dirname(__file__), "logistic_regression_artifacts")
+        
+        # Check if artifacts exist
+        required_files = [
+            "model_summary.csv",
+            "confusion_metrics.json",
+            "roc_curve.csv",
+            "probability_distribution.csv",
+            "metadata.json"
+        ]
+        
+        missing_files = [f for f in required_files if not os.path.exists(os.path.join(artifacts_dir, f))]
+        
+        if missing_files:
+            st.warning(f"""
+            **Artifacts not found.** Please run the training script first:
+            
+            ```bash
+            source venv/bin/activate && python analysis/fit_logistic_regression.py
+            ```
+            
+            Missing files: {', '.join(missing_files)}
+            """)
+        else:
+            try:
+                # Load artifacts
+                model_summary = pd.read_csv(os.path.join(artifacts_dir, "model_summary.csv"))
+                
+                with open(os.path.join(artifacts_dir, "confusion_metrics.json"), 'r') as f:
+                    confusion_data = json.load(f)
+                
+                roc_data = pd.read_csv(os.path.join(artifacts_dir, "roc_curve.csv"))
+                prob_dist = pd.read_csv(os.path.join(artifacts_dir, "probability_distribution.csv"))
+                
+                with open(os.path.join(artifacts_dir, "metadata.json"), 'r') as f:
+                    metadata = json.load(f)
+                
+                # ========== Model Summary ==========
+                st.markdown("#### Model Summary")
+                
+                # Format and display
+                st.dataframe(
+                    model_summary.style.format({
+                        'Coefficient': '{:.4f}',
+                        'Std_Error': '{:.4f}',
+                        'Z_Score': '{:.3f}',
+                        'P_Value': '{:.4f}',
+                        'Odds_Ratio': '{:.4f}',
+                        'CI_Lower_95': '{:.4f}',
+                        'CI_Upper_95': '{:.4f}'
+                    }).apply(
+                        lambda x: ['background-color: #d4edda' if v < 0.05 else '' 
+                                   for v in x] if x.name == 'P_Value' else [''] * len(x),
+                        axis=0
+                    ),
+                    use_container_width=True
+                )
+                
+                # Interpretation
+                st.markdown("**Interpretation:**")
+                interp_cols = st.columns(2)
+                
+                cvd_row = model_summary[model_summary['Variable'] == 'CVD Z-Score'].iloc[0]
+                vwap_row = model_summary[model_summary['Variable'] == 'VWAP Distance %'].iloc[0]
+                
+                with interp_cols[0]:
+                    cvd_or = cvd_row['Odds_Ratio']
+                    cvd_pval = cvd_row['P_Value']
+                    sig_cvd = "✅ Significant" if cvd_pval < 0.05 else "❌ Not significant"
+                    st.metric(
+                        "CVD Z-Score Odds Ratio",
+                        f"{cvd_or:.4f}",
+                        delta=f"p={cvd_pval:.4f} {sig_cvd}"
+                    )
+                    if cvd_or > 1:
+                        st.caption("Higher CVD → Higher odds of positive return")
+                    else:
+                        st.caption("Higher CVD → Lower odds of positive return")
+                
+                with interp_cols[1]:
+                    vwap_or = vwap_row['Odds_Ratio']
+                    vwap_pval = vwap_row['P_Value']
+                    sig_vwap = "✅ Significant" if vwap_pval < 0.05 else "❌ Not significant"
+                    st.metric(
+                        "VWAP Distance % Odds Ratio",
+                        f"{vwap_or:.4f}",
+                        delta=f"p={vwap_pval:.4f} {sig_vwap}"
+                    )
+                    if vwap_or > 1:
+                        st.caption("Further from VWAP → Higher odds of positive return")
+                    else:
+                        st.caption("Further from VWAP → Lower odds of positive return")
+                
+                # ========== Confusion Matrix ==========
+                st.markdown("---")
+                st.markdown("#### Confusion Matrix")
+                
+                cm = np.array(confusion_data['confusion_matrix'])
+                
+                # Create annotated heatmap
+                fig_cm = go.Figure(data=go.Heatmap(
+                    z=cm,
+                    x=['Predicted Negative', 'Predicted Positive'],
+                    y=['Actual Negative', 'Actual Positive'],
+                    text=cm,
+                    texttemplate='%{text}',
+                    textfont={'size': 20},
+                    colorscale='Blues',
+                    showscale=False
+                ))
+                
+                fig_cm.update_layout(
+                    title='Confusion Matrix',
+                    height=350,
+                    template='plotly_white',
+                    xaxis_title='Predicted',
+                    yaxis_title='Actual'
+                )
+                
+                cm_col1, cm_col2 = st.columns([2, 1])
+                with cm_col1:
+                    st.plotly_chart(fig_cm, use_container_width=True, key="logreg_cm")
+                
+                with cm_col2:
+                    st.markdown("**Classification Metrics**")
+                    st.metric("Accuracy", f"{confusion_data['accuracy']:.3f}")
+                    st.metric("Precision", f"{confusion_data['precision']:.3f}")
+                    st.metric("Recall", f"{confusion_data['recall']:.3f}")
+                    st.metric("F1 Score", f"{confusion_data['f1_score']:.3f}")
+                
+                # ========== ROC Curve ==========
+                st.markdown("---")
+                st.markdown("#### ROC Curve")
+                
+                roc_auc = metadata['roc_auc']
+                
+                fig_roc = go.Figure()
+                
+                # ROC curve
+                fig_roc.add_trace(go.Scatter(
+                    x=roc_data['fpr'], y=roc_data['tpr'],
+                    mode='lines',
+                    name=f'ROC (AUC = {roc_auc:.3f})',
+                    line=dict(color='#3b82f6', width=2)
+                ))
+                
+                # Diagonal reference
+                fig_roc.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 1],
+                    mode='lines',
+                    name='Random (AUC = 0.5)',
+                    line=dict(color='gray', width=1, dash='dash')
+                ))
+                
+                fig_roc.update_layout(
+                    title=f'ROC Curve (AUC = {roc_auc:.3f})',
+                    xaxis_title='False Positive Rate',
+                    yaxis_title='True Positive Rate',
+                    height=400,
+                    template='plotly_white',
+                    legend=dict(x=0.6, y=0.1)
+                )
+                
+                roc_col1, roc_col2 = st.columns([3, 1])
+                with roc_col1:
+                    st.plotly_chart(fig_roc, use_container_width=True, key="logreg_roc")
+                
+                with roc_col2:
+                    st.markdown("**AUC Interpretation:**")
+                    if roc_auc >= 0.7:
+                        st.success(f"AUC = {roc_auc:.3f}\nGood discrimination")
+                    elif roc_auc >= 0.6:
+                        st.warning(f"AUC = {roc_auc:.3f}\nModerate discrimination")
+                    else:
+                        st.error(f"AUC = {roc_auc:.3f}\nPoor discrimination")
+                    
+                    st.caption("""
+                    - 0.5 = No discrimination (random)
+                    - 0.6-0.7 = Poor
+                    - 0.7-0.8 = Acceptable
+                    - 0.8-0.9 = Excellent
+                    - >0.9 = Outstanding
+                    """)
+                
+                # ========== Predicted Probability Distribution ==========
+                st.markdown("---")
+                st.markdown("#### Predicted Probability Distribution")
+                
+                prob_dist['Actual Outcome'] = prob_dist['actual'].apply(
+                    lambda x: 'Positive' if x == 1 else 'Negative'
+                )
+                
+                # Two-column layout for better visualizations
+                prob_col1, prob_col2 = st.columns(2)
+                
+                with prob_col1:
+                    # Box plot - shows distribution separation clearly
+                    fig_box = go.Figure()
+                    
+                    for outcome, color in [('Negative', '#ef4444'), ('Positive', '#22c55e')]:
+                        outcome_data = prob_dist[prob_dist['Actual Outcome'] == outcome]['predicted_prob']
+                        fig_box.add_trace(go.Box(
+                            y=outcome_data,
+                            name=outcome,
+                            marker_color=color,
+                            boxpoints='outliers',
+                            jitter=0.3
+                        ))
+                    
+                    fig_box.add_hline(y=0.5, line_dash="dash", line_color="gray", 
+                                      annotation_text="Decision Boundary")
+                    fig_box.update_layout(
+                        title='P(Positive) by Actual Outcome',
+                        yaxis_title='Predicted Probability',
+                        height=400,
+                        template='plotly_white',
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig_box, use_container_width=True, key="logreg_box")
+                
+                with prob_col2:
+                    # Calibration plot - actual positive rate in each probability bin
+                    n_bins = 10
+                    prob_dist['prob_bin'] = pd.cut(prob_dist['predicted_prob'], bins=n_bins, labels=False)
+                    
+                    calibration_data = prob_dist.groupby('prob_bin').agg(
+                        bin_center=('predicted_prob', 'mean'),
+                        actual_positive_rate=('actual', 'mean'),
+                        count=('actual', 'count')
+                    ).reset_index()
+                    
+                    fig_cal = go.Figure()
+                    
+                    # Ideal calibration line
+                    fig_cal.add_trace(go.Scatter(
+                        x=[0, 1], y=[0, 1],
+                        mode='lines',
+                        name='Perfect Calibration',
+                        line=dict(color='gray', dash='dash', width=1)
+                    ))
+                    
+                    # Actual calibration
+                    fig_cal.add_trace(go.Bar(
+                        x=calibration_data['bin_center'],
+                        y=calibration_data['actual_positive_rate'],
+                        name='Actual Positive Rate',
+                        marker_color='#3b82f6',
+                        opacity=0.8,
+                        width=0.08
+                    ))
+                    
+                    fig_cal.update_layout(
+                        title='Calibration: Predicted vs Actual',
+                        xaxis_title='Mean Predicted Probability (bin)',
+                        yaxis_title='Actual Positive Rate',
+                        height=400,
+                        template='plotly_white',
+                        xaxis=dict(range=[0, 1]),
+                        yaxis=dict(range=[0, 1]),
+                        legend=dict(x=0.02, y=0.98)
+                    )
+                    st.plotly_chart(fig_cal, use_container_width=True, key="logreg_calibration")
+                
+                # Violin plot below - full width for detailed view
+                st.markdown("**Detailed Distribution (Violin Plot):**")
+                fig_violin = go.Figure()
+                
+                for outcome, color in [('Negative', '#ef4444'), ('Positive', '#22c55e')]:
+                    outcome_data = prob_dist[prob_dist['Actual Outcome'] == outcome]['predicted_prob']
+                    fig_violin.add_trace(go.Violin(
+                        x=[outcome] * len(outcome_data),
+                        y=outcome_data,
+                        name=outcome,
+                        fillcolor=color,
+                        opacity=0.6,
+                        line_color=color,
+                        meanline_visible=True,
+                        box_visible=True
+                    ))
+                
+                fig_violin.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                fig_violin.update_layout(
+                    title='Probability Distribution by Actual Outcome',
+                    xaxis_title='Actual Outcome',
+                    yaxis_title='Predicted Probability',
+                    height=350,
+                    template='plotly_white',
+                    showlegend=False
+                )
+                st.plotly_chart(fig_violin, use_container_width=True, key="logreg_violin")
+                
+                # Summary stats
+                st.markdown("**Probability Statistics by Outcome:**")
+                stats_col1, stats_col2 = st.columns(2)
+                
+                neg_probs = prob_dist[prob_dist['actual'] == 0]['predicted_prob']
+                pos_probs = prob_dist[prob_dist['actual'] == 1]['predicted_prob']
+                
+                with stats_col1:
+                    st.markdown("**Actual Negative:**")
+                    st.caption(f"Mean P: {neg_probs.mean():.3f} | Median: {neg_probs.median():.3f}")
+                    st.caption(f"% correctly predicted <0.5: {(neg_probs < 0.5).mean()*100:.1f}%")
+                
+                with stats_col2:
+                    st.markdown("**Actual Positive:**")
+                    st.caption(f"Mean P: {pos_probs.mean():.3f} | Median: {pos_probs.median():.3f}")
+                    st.caption(f"% correctly predicted ≥0.5: {(pos_probs >= 0.5).mean()*100:.1f}%")
+                
+                # ========== Data Summary ==========
+                st.markdown("---")
+                st.markdown("#### Data Summary")
+                
+                data_cols = st.columns(4)
+                with data_cols[0]:
+                    st.metric("Total Observations", f"{metadata['total_observations']:,}")
+                with data_cols[1]:
+                    st.metric("Positive Returns", f"{metadata['positive_returns']:,} ({metadata['positive_pct']:.1f}%)")
+                with data_cols[2]:
+                    st.metric("Negative Returns", f"{metadata['negative_returns']:,} ({100-metadata['positive_pct']:.1f}%)")
+                with data_cols[3]:
+                    st.metric("Events Included", f"{metadata['n_events']}")
+                
+                # Data filter info
+                with st.expander("📋 Model Details"):
+                    st.markdown(f"""
+                    **Data Filters:**
+                    - Years: {metadata['data_filter']['years']}
+                    - Time Window: {metadata['data_filter']['time_window_minutes']}
+                    
+                    **Predictors:** {', '.join(metadata['predictors'])}
+                    
+                    **Target:** {metadata['target']}
+                    
+                    **To retrain the model:**
+                    ```bash
+                    source venv/bin/activate && python analysis/fit_logistic_regression.py
+                    ```
+                    """)
+            
+            except Exception as e:
+                st.error(f"Error loading artifacts: {str(e)}")
+                st.exception(e)
 
 
 if __name__ == "__main__":
