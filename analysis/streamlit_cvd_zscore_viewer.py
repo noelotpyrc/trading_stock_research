@@ -436,6 +436,36 @@ def main():
                 
                 # Stats for 5-30m
                 st.caption(f"n={len(dist_df_5_30):,} | σ={dist_df_5_30['cvd_zscore'].std():.2f} | skew={dist_df_5_30['cvd_zscore'].skew():.2f}")
+        
+        # Percentile Distribution Table for 5-30m
+        st.markdown("---")
+        st.markdown("### CVD Z-Score Percentile Distribution (5-30m)")
+        
+        if not dist_df_5_30.empty:
+            percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+            cvd_values = dist_df_5_30['cvd_zscore'].dropna()
+            
+            percentile_data = {
+                'Percentile': [f'{p}th' for p in percentiles],
+                'CVD Z-Score': [cvd_values.quantile(p/100) for p in percentiles]
+            }
+            percentile_df = pd.DataFrame(percentile_data)
+            
+            # Transpose for horizontal display
+            percentile_display = percentile_df.set_index('Percentile').T
+            
+            st.dataframe(
+                percentile_display.style.format('{:.3f}').background_gradient(
+                    cmap='RdYlGn', axis=1
+                ),
+                use_container_width=True
+            )
+            
+            # Additional stats
+            st.caption(f"**IQR (25th-75th):** {cvd_values.quantile(0.75) - cvd_values.quantile(0.25):.3f} | "
+                       f"**Range (1st-99th):** {cvd_values.quantile(0.99) - cvd_values.quantile(0.01):.3f}")
+        else:
+            st.warning("No data available for 5-30m window.")
 
     # ========== TAB 3: Single Event ==========
     with tab3:

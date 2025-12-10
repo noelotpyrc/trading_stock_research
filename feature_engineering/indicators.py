@@ -178,3 +178,80 @@ def calculate_rolling_zscore(series, window):
     
     zscore = (series - rolling_mean) / rolling_std
     return zscore.rename(f'zscore_{window}')
+
+
+def calculate_cvd_zscore_expanding(df, event_time, min_periods=60):
+    """
+    Calculate CVD Z-Score using expanding window of CVD values SINCE the event.
+    
+    For each bar after the event:
+    - Collect all CVD values from event_time up to current bar
+    - Calculate mean and std from those accumulated CVD values
+    - z_cvd = (current_cvd - mean(cvd_history)) / std(cvd_history)
+    
+    This matches the strategy pseudocode where cvd_history accumulates since event.
+    
+    Args:
+        df: DataFrame with 'timestamp' and 'cvd_since_event' (or OHLCV to calculate).
+            Must be sorted by timestamp.
+        event_time: Datetime of the earnings event
+        min_periods: Minimum CVD samples required before calculating z-score (default 60)
+    
+    Returns:
+        Series: CVD z-score values (NaN for rows before event or < min_periods)
+    
+    Example:
+        df['cvd_zscore'] = calculate_cvd_zscore_expanding(df, event_time, min_periods=60)
+    """
+    df = df.copy()
+    
+    # Ensure datetime
+    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    
+    event_time = pd.to_datetime(event_time, utc=True)
+    
+    # Get or calculate cvd_since_event
+    if 'cvd_since_event' in df.columns:
+        cvd = df['cvd_since_event']
+    else:
+        # Calculate delta and CVD from event time
+        if 'delta' not in df.columns:
+            delta = estimate_delta(df)
+        else:
+            delta = df['delta']
+        
+        # Only accumulate from event time
+        post_event_mask = df['timestamp'] >= event_time
+        cvd = pd.Series(np.nan, index=df.index)
+        cvd[post_event_mask] = delta[post_event_mask].cumsum()
+    
+    # Initialize result
+    result = pd.Series(np.nan, index=df.index, name='cvd_zscore')
+    
+    # Get post-event indices
+    post_event_mask = df['timestamp'] >= event_time
+    post_event_indices = df.index[post_event_mask]
+    
+    if len(post_event_indices) < min_periods:
+        return result
+    
+    # Calculate expanding z-score for post-event data
+    # expanding() gives cumulative mean/std up to each point
+    cvd_post_event = cvd[post_event_mask]
+    
+    expanding_mean = cvd_post_event.expanding(min_periods=min_periods).mean()
+    expanding_std = cvd_post_event.expanding(min_periods=min_periods).std()
+    
+    # Avoid division by zero
+    expanding_std = expanding_std.replace(0, np.nan)
+    
+    # z_cvd = (current_cvd - mean(cvd_history)) / std(cvd_history)
+    z_cvd = (cvd_post_event - expanding_mean) / expanding_std
+    
+    result[post_event_mask] = z_cvd
+    
+    return result
+
+
+

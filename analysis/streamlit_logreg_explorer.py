@@ -306,12 +306,20 @@ def main():
                 )
             
             if selected_event:
-                # Time range
-                time_col1, time_col2 = st.columns(2)
-                with time_col1:
+                # Time range and signal settings
+                settings_col1, settings_col2, settings_col3, settings_col4 = st.columns(4)
+                with settings_col1:
                     time_min = st.number_input("From (seconds)", min_value=0, max_value=7200, value=0, step=60)
-                with time_col2:
+                with settings_col2:
                     time_max = st.number_input("To (seconds)", min_value=0, max_value=7200, value=1800, step=60)
+                with settings_col3:
+                    signal_direction = st.selectbox("Signal Direction", options=["Long", "Short"], key="signal_dir")
+                with settings_col4:
+                    threshold = st.slider(
+                        "Probability Threshold", 
+                        min_value=0.0, max_value=1.0, value=0.6 if signal_direction == "Long" else 0.4, 
+                        step=0.05, key="prob_threshold"
+                    )
                 
                 # Get event data
                 event_df = filtered_df[
@@ -332,13 +340,23 @@ def main():
                     if pd.notna(event_price) and event_price > 0:
                         event_df['price_return_pct'] = ((event_df['close'] - event_price) / event_price) * 100
                     
+                    # Determine signal zones based on direction and threshold
+                    if signal_direction == "Long":
+                        event_df['signal_active'] = event_df['pred_prob'] >= threshold
+                        signal_color = 'rgba(34,197,94,0.4)'  # Green
+                        signal_label = f"Long Zone (P≥{threshold:.2f})"
+                    else:
+                        event_df['signal_active'] = event_df['pred_prob'] <= threshold
+                        signal_color = 'rgba(239,68,68,0.4)'  # Red
+                        signal_label = f"Short Zone (P≤{threshold:.2f})"
+                    
                     # Create stacked subplot
                     fig = make_subplots(
                         rows=3, cols=1,
                         shared_xaxes=True,
                         vertical_spacing=0.08,
                         row_heights=[0.35, 0.35, 0.30],
-                        subplot_titles=('Price', 'CVD Z-Score', 'Predicted P(Positive)')
+                        subplot_titles=('Price', 'CVD Z-Score', f'Predicted P(Positive) - {signal_direction} Signal')
                     )
                     
                     # Row 1: Price
@@ -349,19 +367,13 @@ def main():
                         row=1, col=1
                     )
                     
-                    # Row 2: CVD Z-Score with background colors
+                    # Row 2: CVD Z-Score with signal zone coloring
                     for i in range(len(event_df) - 1):
-                        p = event_df['pred_prob'].iloc[i]
-                        if pd.isna(p):
-                            color = 'rgba(128,128,128,0.1)'
-                        elif p >= 0.6:
-                            color = 'rgba(34,197,94,0.3)'
-                        elif p >= 0.5:
-                            color = 'rgba(34,197,94,0.15)'
-                        elif p >= 0.4:
-                            color = 'rgba(239,68,68,0.15)'
+                        is_signal = event_df['signal_active'].iloc[i]
+                        if is_signal:
+                            color = signal_color
                         else:
-                            color = 'rgba(239,68,68,0.3)'
+                            color = 'rgba(128,128,128,0.05)'
                         
                         fig.add_vrect(
                             x0=event_df['seconds_since_event'].iloc[i],
@@ -377,20 +389,55 @@ def main():
                     )
                     fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=2, col=1)
                     
-                    # Row 3: Predicted Probability
+                    # Row 3: Predicted Probability with threshold-based fill
+                    # Create filled area above/below threshold
+                    probs = event_df['pred_prob'].values
+                    times = event_df['seconds_since_event'].values
+                    
+                    if signal_direction == "Long":
+                        # Fill area above threshold
+                        fill_probs = np.where(probs >= threshold, probs, threshold)
+                        fig.add_trace(
+                            go.Scatter(x=times, y=fill_probs, mode='lines', line=dict(width=0),
+                                       showlegend=False, hoverinfo='skip'),
+                            row=3, col=1
+                        )
+                        fig.add_trace(
+                            go.Scatter(x=times, y=[threshold]*len(times), mode='lines', 
+                                       line=dict(width=0), fill='tonexty', fillcolor='rgba(34,197,94,0.3)',
+                                       name=signal_label, showlegend=True),
+                            row=3, col=1
+                        )
+                    else:
+                        # Fill area below threshold
+                        fill_probs = np.where(probs <= threshold, probs, threshold)
+                        fig.add_trace(
+                            go.Scatter(x=times, y=[threshold]*len(times), mode='lines', 
+                                       line=dict(width=0), showlegend=False, hoverinfo='skip'),
+                            row=3, col=1
+                        )
+                        fig.add_trace(
+                            go.Scatter(x=times, y=fill_probs, mode='lines', line=dict(width=0),
+                                       fill='tonexty', fillcolor='rgba(239,68,68,0.3)',
+                                       name=signal_label, showlegend=True),
+                            row=3, col=1
+                        )
+                    
+                    # Main probability line
                     fig.add_trace(
-                        go.Scatter(x=event_df['seconds_since_event'], y=event_df['pred_prob'],
-                                   mode='lines', name='P(Positive)', line=dict(color='#f97316', width=2),
-                                   fill='tozeroy', fillcolor='rgba(249,115,22,0.2)'),
+                        go.Scatter(x=times, y=probs, mode='lines', name='P(Positive)',
+                                   line=dict(color='#f97316', width=2)),
                         row=3, col=1
                     )
-                    fig.add_hline(y=0.5, line_dash="dash", line_color="gray", opacity=0.7, row=3, col=1)
-                    fig.add_hline(y=0.6, line_dash="dot", line_color="green", opacity=0.5, row=3, col=1)
-                    fig.add_hline(y=0.4, line_dash="dot", line_color="red", opacity=0.5, row=3, col=1)
+                    
+                    # Threshold line
+                    fig.add_hline(y=threshold, line_dash="dash", line_color="black", opacity=0.8, row=3, col=1,
+                                  annotation_text=f"Threshold: {threshold:.2f}", annotation_position="right")
                     
                     fig.update_layout(
-                        height=700, template='plotly_white', showlegend=False,
-                        title_text=f"{selected_ticker} - Entry Signal Analysis"
+                        height=700, template='plotly_white',
+                        title_text=f"{selected_ticker} - {signal_direction} Signal Analysis",
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5)
                     )
                     fig.update_xaxes(title_text="Seconds Since Event", row=3, col=1)
                     fig.update_yaxes(title_text="Price ($)", row=1, col=1)
@@ -399,23 +446,31 @@ def main():
                     
                     st.plotly_chart(fig, use_container_width=True, key="entry_chart")
                     
-                    # Legend
-                    st.caption("""
-                    **Background Colors:** 🟢 Dark=P≥0.6 | 🟢 Light=P≥0.5 | 🔴 Light=P<0.5 | 🔴 Dark=P<0.4
-                    """)
-                    
                     # Signal summary
-                    st.markdown("**Signal Summary:**")
-                    sig_cols = st.columns(4)
+                    st.markdown(f"**{signal_direction} Signal Summary (threshold={threshold:.2f}):**")
+                    sig_cols = st.columns(5)
                     valid_probs = event_df['pred_prob'].dropna()
+                    signal_pct = event_df['signal_active'].mean() * 100
+                    
                     with sig_cols[0]:
                         st.metric("Mean P", f"{valid_probs.mean():.3f}")
                     with sig_cols[1]:
-                        st.metric("Max P", f"{valid_probs.max():.3f}")
+                        st.metric("Max P" if signal_direction == "Long" else "Min P", 
+                                  f"{valid_probs.max():.3f}" if signal_direction == "Long" else f"{valid_probs.min():.3f}")
                     with sig_cols[2]:
-                        st.metric("% P≥0.6", f"{(valid_probs >= 0.6).mean()*100:.1f}%")
+                        st.metric(f"% in {signal_direction} Zone", f"{signal_pct:.1f}%")
                     with sig_cols[3]:
-                        st.metric("% P<0.4", f"{(valid_probs < 0.4).mean()*100:.1f}%")
+                        # Count signal windows (consecutive True values)
+                        signal_changes = event_df['signal_active'].diff().fillna(False)
+                        n_windows = (signal_changes & event_df['signal_active']).sum()
+                        st.metric("Signal Windows", int(n_windows))
+                    with sig_cols[4]:
+                        # Average signal duration
+                        if signal_pct > 0:
+                            avg_duration = len(event_df[event_df['signal_active']]) / max(1, n_windows)
+                            st.metric("Avg Window Size", f"{avg_duration:.0f} bars")
+                        else:
+                            st.metric("Avg Window Size", "N/A")
     
     # ========== TAB 3: Signal Statistics ==========
     with tab3:
